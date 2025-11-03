@@ -83,7 +83,7 @@ def test_card():
     assert card.card_type == CardType.BASIC, "Card type should be BASIC"
     assert card.value == 5, "Card value should be 5"
     assert card.name == "Test Card", "Card name should be 'Test Card'"
-    assert card.unlocked == True, "Basic cards should be unlocked"
+    assert card.unlocked, "Basic cards should be unlocked"
     
     advanced_card = Card(CardType.ADVANCED, 10, "Advanced Card")
     assert not advanced_card.unlocked, "Advanced cards should start locked"

@@ -377,8 +377,8 @@ class ScoundrelGame:
                 self.play_card(self.selected_card)
                 self.selected_card = None
                 
-                # Check for game over
-                if not self.deck and not self.hand:
+                # Check for game over (deck empty means no more cards to draw)
+                if not self.deck:
                     self.state = "game_over"
                     self.score_system.save_scores()
         
