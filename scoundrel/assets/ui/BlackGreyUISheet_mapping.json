@@ -1,0 +1,6 @@
+{
+  "window_frame": "tile_000",
+  "button_normal": "tile_001",
+  "button_hover": "tile_002",
+  "button_pressed": "tile_003"
+}

@@ -3,6 +3,49 @@ import json
 from pathlib import Path
 from collections import deque
 from .cards.deck import Deck, Card
+from typing import Any, Optional, List, Dict
+
+# UI atlas and widgets (optional best-effort imports)
+# Annotate as Any first so static type checkers don't treat these as
+# immutable types when we fall back to `None` on import failure.
+UIAtlas: Any = None
+NinePatchButton: Any = None
+try:
+    from .utils.ui_atlas import UIAtlas as _UIAtlas
+    UIAtlas = _UIAtlas
+except Exception:
+    UIAtlas = None
+try:
+    # Perform a runtime dynamic import to avoid static analyzers failing on
+    # relative imports when the optional UI package isn't present.
+    import importlib
+
+    _mod = None
+    if __package__:
+        try:
+            # Try a relative import using the current package context
+            _mod = importlib.import_module(".ui.widgets", package=__package__)
+        except Exception:
+            # Fallback: try importing using the package root as an absolute path
+            try:
+                root = __package__.split(".")[0]
+                _mod = importlib.import_module(f"{root}.ui.widgets")
+            except Exception:
+                _mod = None
+    else:
+        # No package context; try importing a top-level module name if available
+        try:
+            _mod = importlib.import_module("ui.widgets")
+        except Exception:
+            _mod = None
+
+    if _mod is not None:
+        _NinePatchButton = getattr(_mod, "NinePatchButton", None)
+        NinePatchButton = _NinePatchButton
+    else:
+        NinePatchButton = None
+except Exception:
+    NinePatchButton = None
 
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
@@ -10,6 +53,11 @@ from .utils.assets import CardArtManager
 
 
 class GameEngine:
+    # Instance attributes (typed for static analysis)
+    deck: Deck
+    discard: List[Card]
+    equipped_weapon: Optional[Dict[str, Any]]
+    room: List[Card]
     def __init__(self, screen, card_size=(120, 180)):
         # `display` is the real window surface. We will render into a virtual buffer
         # at a pixel-perfect virtual resolution and scale that buffer to the display.
@@ -137,6 +185,113 @@ class GameEngine:
             self._font_path = None
         # simple cache for pygame.font.Font objects by size
         self._font_cache = {}
+        # try to load UI atlas and semantic mapping for spritesheet-backed widgets
+        self._ui_atlas = None
+        self._ui_mapping = {}
+        # cache for extracted atlas surfaces and created UI widget instances
+        self._atlas_surface_cache = {}
+        self._ui_buttons_cache = {}
+        try:
+            if UIAtlas is not None:
+                atlas_img = Path(__file__).resolve().parents[1] / "assets" / "ui" / "BlackGreyUISheet.png"
+                atlas_json = Path(__file__).resolve().parents[1] / "assets" / "ui" / "BlackGreyUISheet.json"
+                mapping_json = Path(__file__).resolve().parents[1] / "assets" / "ui" / "BlackGreyUISheet_mapping.json"
+                if atlas_img.exists():
+                    ua = UIAtlas(atlas_img, atlas_json if atlas_json.exists() else None)
+                    try:
+                        ua.load_image()
+                    except Exception:
+                        pass
+                    if atlas_json.exists():
+                        try:
+                            ua.load_descriptor(atlas_json)
+                        except Exception:
+                            pass
+                    self._ui_atlas = ua
+                if mapping_json.exists():
+                    try:
+                        self._ui_mapping = json.loads(mapping_json.read_text())
+                    except Exception:
+                        self._ui_mapping = {}
+        except Exception:
+            self._ui_atlas = None
+            self._ui_mapping = {}
+
+    # --- UI atlas helpers ---
+    def _get_atlas_tile(self, semantic_name: str):
+        """Return (Surface, inset_tuple) for a semantic tile name, or (None, None).
+
+        Uses self._ui_mapping to find the tile id, then extracts and caches the surface.
+        """
+        try:
+            if not self._ui_atlas:
+                return None, None
+            tid = self._ui_mapping.get(semantic_name)
+            if not tid:
+                return None, None
+            # cached by tile id
+            if tid in self._atlas_surface_cache:
+                t, inset = self._atlas_surface_cache[tid]
+                return t, inset
+            tile = self._ui_atlas.tiles.get(tid)
+            if not tile:
+                return None, None
+            tx, ty, tw, th = tile.get("x"), tile.get("y"), tile.get("w"), tile.get("h")
+            try:
+                surf = self._ui_atlas.image.subsurface(pygame.Rect(tx, ty, tw, th)).copy().convert_alpha()
+            except Exception:
+                return None, None
+            inset = tuple(tile.get("ninepatch", [4, 4, 4, 4]))
+            self._atlas_surface_cache[tid] = (surf, inset)
+            return surf, inset
+        except Exception:
+            return None, None
+
+    def _get_or_create_ninepatch_button(self, cache_key: str, semantic_tile: str, pos, size, text, font):
+        """Return a cached NinePatchButton instance for given key, creating it if missing or out-of-date."""
+        try:
+            # check cache
+            existing = self._ui_buttons_cache.get(cache_key)
+            if existing:
+                btn, meta = existing
+                # meta: (pos, size, text)
+                if meta == (pos, size, text):
+                    # update rect in case pos changed slightly
+                    btn.rect.topleft = (pos[0], pos[1])
+                    return btn
+            # Try to assemble a state->surface mapping for buttons (normal/hover/pressed)
+            surf_map = None
+            try:
+                # If the semantic_tile is a button base name, look up alternate states
+                if semantic_tile.startswith("button"):
+                    states = ["button_normal", "button_hover", "button_pressed"]
+                    sm = {}
+                    found = False
+                    for sname in states:
+                        s_surf, s_inset = self._get_atlas_tile(sname)
+                        if s_surf is not None:
+                            sm_key = sname.replace("button_", "")
+                            sm[sm_key] = s_surf
+                            inset = s_inset
+                            found = True
+                    if found:
+                        surf_map = sm
+                # fallback: single tile
+                if surf_map is None:
+                    surf, inset = self._get_atlas_tile(semantic_tile)
+                    if surf is None or NinePatchButton is None:
+                        return None
+                    btn = NinePatchButton(surf, inset, pos, size, font=font, text=text)
+                else:
+                    # use the assembled state map and pass the inset we discovered
+                    btn = NinePatchButton(surf_map, inset, pos, size, font=font, text=text)
+            except Exception:
+                # if any error building the surf_map fallback, continue to return None
+                return None
+            self._ui_buttons_cache[cache_key] = (btn, (pos, size, text))
+            return btn
+        except Exception:
+            return None
 
     def get_font(self, size: int):
         """Return a cached pygame.font.Font at the requested size. Falls back to SysFont on error."""
@@ -221,6 +376,42 @@ class GameEngine:
 
         anim.setdefault("frames_left", anim.get("total", 12))
 
+        # Deduplicate conflicting animations for the same card. In particular,
+        # prevent a 'to_weapon' and a 'discard' for the same card both being
+        # queued (which causes the snap-to-weapon-then-discard glitch).
+        try:
+            c = anim.get("card")
+            if c is not None:
+                cid = id(c)
+                def keep(a):
+                    try:
+                        ac = a.get("card")
+                        if ac is None:
+                            return True
+                        aid = id(ac)
+                        # If this queued anim targets the same card and is the
+                        # opposite of the new anim (discard <-> to_weapon), drop it.
+                        if aid == cid:
+                            t_new = anim.get("type")
+                            t_old = a.get("type")
+                            if (t_new == "to_weapon" and t_old == "discard") or (t_new == "discard" and t_old == "to_weapon"):
+                                return False
+                        return True
+                    except Exception:
+                        return True
+                self._anim_queue = deque([a for a in self._anim_queue if keep(a)])
+        except Exception:
+            pass
+
+        if getattr(self, "_debug", False):
+            try:
+                at = anim.get("type")
+                ac = anim.get("card")
+                aid = id(ac) if ac is not None else None
+                print(f"[DEBUG] enqueue_animation type={at} card_id={aid} start={anim.get('start')} end={anim.get('end')} total={anim.get('total')}")
+            except Exception:
+                pass
+
         if self._active_anim is None:
             self._active_anim = anim
             # play sfx for start
@@ -255,6 +446,12 @@ class GameEngine:
     def _on_animation_complete(self, anim: dict):
         typ = anim.get("type")
         card = anim.get("card")
+        if getattr(self, "_debug", False):
+            try:
+                cid = id(card) if card is not None else None
+                print(f"[DEBUG] animation_complete type={typ} card_id={cid}")
+            except Exception:
+                pass
         # finalise state changes
         try:
             if typ == "draw":
@@ -268,10 +465,23 @@ class GameEngine:
                     pass
             elif typ == "discard":
                 try:
-                    self.discard.append(card)
+                    if getattr(self, "_debug", False):
+                        try:
+                            print(f"[DEBUG] appending to discard card_id={id(card) if card is not None else None}")
+                        except Exception:
+                            pass
+                    # Only append if it looks like a Card instance
+                    if isinstance(card, Card):
+                        self.discard.append(card)
                 except Exception:
-                    self.discard = getattr(self, "discard", [])
-                    self.discard.append(card)
+                    # Ensure discard is a list before appending; defensive fallback
+                    cur = getattr(self, "discard", None)
+                    if not isinstance(cur, list):
+                        self.discard = []
+                    else:
+                        self.discard = cur
+                    if isinstance(card, Card):
+                        self.discard.append(card)
             elif typ == "equip":
                 # set equipped weapon (new card). keep stack if replaced already handled
                 self.equipped_weapon = {"card": card, "stack": [], "last_monster": None}
@@ -280,8 +490,8 @@ class GameEngine:
                 if not self.equipped_weapon:
                     self.equipped_weapon = {"card": None, "stack": [], "last_monster": None}
                 try:
-                    # Only append and update last_monster when card is valid
-                    if card is not None:
+                    # Only append and update last_monster when card is a Card
+                    if isinstance(card, Card):
                         self.equipped_weapon["stack"].append(card)
                         mv = getattr(card, "value", None)
                         if mv is not None:
@@ -292,6 +502,22 @@ class GameEngine:
             pass
 
         # clear active and start next
+        # If the completed animation moved a card onto the weapon stack,
+        # ensure there are no stray discard animations queued for the same
+        # card (this can happen if fallbacks/enqueue order race). Remove
+        # any pending discard anims for this exact card to avoid it
+        # snapping to weapon then immediately sliding to discard.
+        try:
+            if anim.get("type") == "to_weapon" and anim.get("card") is not None:
+                cid = id(anim.get("card"))
+                try:
+                    # filter out queued discard animations for this card
+                    self._anim_queue = deque([a for a in self._anim_queue if not (a.get("type") == "discard" and id(a.get("card")) == cid)])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         self._active_anim = None
         if self._anim_queue:
             self._active_anim = self._anim_queue.popleft()
@@ -328,20 +554,23 @@ class GameEngine:
             anim = {"type": "discard", "card": card, "start": sp, "end": end, "total": 14}
             self._enqueue_animation(anim)
         except Exception:
-            try:
+            if isinstance(card, Card):
                 self.discard.append(card)
-            except Exception:
+            else:
                 pass
 
     def reset_state(self):
         self.deck = Deck()
         self.deck.shuffle()
-        self.discard = []
+        # typed container of discarded Card objects
+        self.discard: List[Card] = []
         self.health = 20
         self.starting_health = 20
         self.last_potion_value = 0
-        self.equipped_weapon = None  # {'card': Card, 'stack': [Card], 'last_monster': int|None}
-        self.room = []  # face-up cards (list of Card)
+        # equipped_weapon holds a dict with keys: card, stack, last_monster
+        self.equipped_weapon: Optional[Dict[str, Any]] = None
+        # face-up cards (list of Card)
+        self.room: List[Card] = []
         self.previous_avoided = False
         self.used_potion_this_turn = False
         self.pending_combat = None
@@ -356,7 +585,7 @@ class GameEngine:
         self.paused = False
         self.in_settings = False
         # history of last-interacted cards (most recent appended at end)
-        self._interaction_history = []
+        self._interaction_history: List[Card] = []
         # reset animation queue state
         self._anim_queue = deque()
         self._active_anim = None
@@ -365,6 +594,26 @@ class GameEngine:
         # but will not be rendered at its slot until its draw animation
         # completes.
         self._pending_draw_ids = set()
+        # developer debug flag: set True to get lightweight console traces
+        # for animation and potion-related events
+        self._debug = False
+
+    def _reset_used_potion_flag(self, reason: Optional[str] = None):
+        """Reset the per-room potion-used flag. When debugging, emit a trace
+        including an optional reason to help diagnose timing/order issues.
+        """
+        try:
+            self.used_potion_this_turn = False
+            if getattr(self, "_debug", False):
+                m = f"[DEBUG] reset used_potion_this_turn"
+                if reason:
+                    m += f" (reason={reason})"
+                print(m)
+        except Exception:
+            try:
+                self.used_potion_this_turn = False
+            except Exception:
+                pass
 
 
     # Save/load functionality has been removed. Game state is not persisted.
@@ -446,8 +695,21 @@ class GameEngine:
         cards = self.room[:4]
         self.room = []
         self.deck.add_to_bottom(cards)
-        self.previous_avoided = True
-        self.used_potion_this_turn = False
+        # mark that we've avoided this room and reset potion-use flag
+        try:
+            self.previous_avoided = True
+        except Exception:
+            self.previous_avoided = True
+        try:
+            self._reset_used_potion_flag("avoid_room")
+        except Exception:
+            try:
+                self._reset_used_potion_flag("avoid_room_fallback")
+            except Exception:
+                try:
+                    self.used_potion_this_turn = False
+                except Exception:
+                    pass
         return True
 
     def face_card(self, index, prefer_weapon=None, start_pos=None):
@@ -491,7 +753,7 @@ class GameEngine:
         self.previous_avoided = False
         if card.suit in ("clubs", "spades"):
             # Monster
-            result = self._resolve_monster(card, prefer_weapon=prefer_weapon)
+            result = self._resolve_monster(card, prefer_weapon=prefer_weapon, start_pos=start_pos)
             result["card"] = card
             return result
         elif card.suit == "diamonds":
@@ -500,28 +762,44 @@ class GameEngine:
             self._equip_weapon(card, start_pos=start_pos)
             return {"card": card, "action": "equip"}
         elif card.suit == "hearts":
-            # potion
-            if not self.used_potion_this_turn:
+            # potion: always restore health up to starting_health when used.
+            # Any overflow is lost (cap at starting_health).
+            add = 0
+            try:
                 add = min(self.starting_health - self.health, card.value)
-                self.health += add
+            except Exception:
+                add = 0
+            try:
+                if add and add > 0:
+                    self.health += add
+            except Exception:
+                pass
+            # mark potion used flag (kept for compatibility) and record last value
+            try:
                 self.used_potion_this_turn = True
-                self.last_potion_value = card.value
+            except Exception:
+                self.used_potion_this_turn = True
+            self.last_potion_value = card.value
+            if getattr(self, "_debug", False):
                 try:
-                    self._play_sfx("potionUse")
+                    print(f"[DEBUG] potion used (always): +{add} hp -> health={self.health}; used_potion_this_turn={self.used_potion_this_turn}")
                 except Exception:
                     pass
-                return {"card": card, "action": "potion_used", "added": add}
-            else:
-                # discarded: move to discard with animation and sound
+            try:
+                self._play_sfx("potionUse")
+            except Exception:
+                pass
+            # animate the potion moving to discard so the player sees the
+            # card slide away from its slot into the discard pile.
+            try:
+                self._move_to_discard(card, start_pos)
+            except Exception:
                 try:
-                    # play potion use discard sound? also use general cardFlip for slide
-                    self._move_to_discard(card, start_pos)
-                except Exception:
-                    try:
+                    if isinstance(card, Card):
                         self.discard.append(card)
-                    except Exception:
-                        pass
-                return {"card": card, "action": "potion_discarded"}
+                except Exception:
+                    pass
+            return {"card": card, "action": "potion_used", "added": add}
 
     def _equip_weapon(self, card: Card, start_pos=None):
         # When equipping a new weapon, animate any previous weapon+stack to discard
@@ -532,17 +810,38 @@ class GameEngine:
                 try:
                     wrect = getattr(self, "weapon_rect", None)
                     start = wrect.topleft if wrect is not None else None
-                    # enqueue previous weapon discard
-                    self._move_to_discard(prev_card, start)
+                    # enqueue previous weapon discard if it looks like a Card
+                    if isinstance(prev_card, Card):
+                        self._move_to_discard(prev_card, start)
+                    else:
+                        # fallback: only append if it actually looks like a Card
+                        try:
+                            if isinstance(prev_card, Card):
+                                self.discard.append(prev_card)
+                        except Exception:
+                            pass
                 except Exception:
                     try:
                         self.discard.append(prev_card)
                     except Exception:
                         pass
             # enqueue stacked monsters to discard as well
-            for m in list(self.equipped_weapon.get("stack", [])):
+            if isinstance(self.equipped_weapon, dict):
+                stack = list(self.equipped_weapon.get("stack", []))
+            else:
+                stack = []
+            for m in stack:
                 try:
-                    self._move_to_discard(m)
+                    # only move objects that look like Card instances
+                    if isinstance(m, Card):
+                        self._move_to_discard(m)
+                    else:
+                        # non-Card fallback: only append if it's actually a Card
+                        try:
+                            if isinstance(m, Card):
+                                self.discard.append(m)
+                        except Exception:
+                            pass
                 except Exception:
                     try:
                         self.discard.append(m)
@@ -559,14 +858,18 @@ class GameEngine:
             # fallback: set immediately
             self.equipped_weapon = {"card": card, "stack": [], "last_monster": None}
 
-    def _resolve_monster(self, card: Card, prefer_weapon: bool | None = None):
+    def _resolve_monster(self, card: Card, prefer_weapon: bool | None = None, start_pos=None):
         # choose behavior based on prefer_weapon flag
         monster_value = card.value
         if prefer_weapon is True:
             # force weapon
             if self.equipped_weapon:
                 last = self.equipped_weapon.get("last_monster")
-                allowed = (last is None) or (monster_value <= last)
+                # last_monster should be an int or None; guard against bad values
+                if last is None or isinstance(last, int):
+                    allowed = (last is None) or (monster_value <= last)
+                else:
+                    allowed = False
                 if allowed:
                     weapon_value = self.equipped_weapon["card"].value
                     remaining = monster_value - weapon_value
@@ -575,23 +878,26 @@ class GameEngine:
                     # enqueue animation to move monster onto weapon stack
                     layout = self._compute_layout()
                     weapon_pos = layout.get("weapon_pos")
-                    # choose reasonable start position from recent room rects if available
-                    sp = None
-                    try:
-                        if hasattr(self, "room_rects") and self.room_rects:
-                            sp = self.room_rects[0].topleft
-                    except Exception:
-                        sp = None
+                    # prefer an explicit start_pos when provided (from face_card)
+                    sp = start_pos
+                    # choose reasonable start position from recent room rects if not provided
+                    if sp is None:
+                        try:
+                            if hasattr(self, "room_rects") and self.room_rects:
+                                sp = self.room_rects[0].topleft
+                        except Exception:
+                            sp = None
                     if sp is None:
                         sp = getattr(self, "_last_weapon_pos", weapon_pos)
                     try:
                         anim = {"type": "to_weapon", "card": card, "start": sp, "end": weapon_pos, "total": 12}
                         self._enqueue_animation(anim)
                     except Exception:
-                        # fallback: append immediately
+                        # fallback: append immediately (guard type)
                         try:
-                            self.equipped_weapon["stack"].append(card)
-                            self.equipped_weapon["last_monster"] = monster_value
+                            if isinstance(card, Card) and isinstance(self.equipped_weapon, dict):
+                                self.equipped_weapon["stack"].append(card)
+                                self.equipped_weapon["last_monster"] = monster_value
                         except Exception:
                             pass
                     # update last_monster even if animation pending
@@ -606,10 +912,13 @@ class GameEngine:
             self.health -= monster_value
             try:
                 # animate + sound for discard
-                self._move_to_discard(card)
+                # prefer to start the discard animation from the card's visual
+                # slot when provided via start_pos; fall back to default otherwise
+                self._move_to_discard(card, start_pos)
             except Exception:
                 try:
-                    self.discard.append(card)
+                    if isinstance(card, Card):
+                        self.discard.append(card)
                 except Exception:
                     pass
             try:
@@ -622,7 +931,11 @@ class GameEngine:
         # prefer_weapon is None: auto behavior
         if self.equipped_weapon:
             last = self.equipped_weapon.get("last_monster")
-            allowed = (last is None) or (monster_value <= last)
+            # last_monster should be an int or None; guard against bad values
+            if last is None or isinstance(last, int):
+                allowed = (last is None) or (monster_value <= last)
+            else:
+                allowed = False
             if allowed:
                 weapon_value = self.equipped_weapon["card"].value
                 remaining = monster_value - weapon_value
@@ -631,12 +944,15 @@ class GameEngine:
                 # enqueue animation to move monster onto weapon stack
                 layout = self._compute_layout()
                 weapon_pos = layout.get("weapon_pos")
-                sp = None
-                try:
-                    if hasattr(self, "room_rects") and self.room_rects:
-                        sp = self.room_rects[0].topleft
-                except Exception:
-                    sp = None
+                # prefer an explicit start_pos when provided (from face_card)
+                sp = start_pos
+                # choose reasonable start position from recent room rects if not provided
+                if sp is None:
+                    try:
+                        if hasattr(self, "room_rects") and self.room_rects:
+                            sp = self.room_rects[0].topleft
+                    except Exception:
+                        sp = None
                 if sp is None:
                     sp = getattr(self, "_last_weapon_pos", weapon_pos)
                 try:
@@ -644,12 +960,14 @@ class GameEngine:
                     self._enqueue_animation(anim)
                 except Exception:
                     try:
-                        self.equipped_weapon["stack"].append(card)
-                        self.equipped_weapon["last_monster"] = monster_value
+                        if isinstance(card, Card) and isinstance(self.equipped_weapon, dict):
+                            self.equipped_weapon["stack"].append(card)
+                            self.equipped_weapon["last_monster"] = monster_value
                     except Exception:
                         pass
                 try:
-                    self.equipped_weapon["last_monster"] = monster_value
+                    if isinstance(self.equipped_weapon, dict):
+                        self.equipped_weapon["last_monster"] = monster_value
                 except Exception:
                     pass
                 try:
@@ -662,11 +980,13 @@ class GameEngine:
         # when monster is discarded (barehanded), animate if possible
         try:
             # find a reasonable start position from room_rects if available
-            start_pos = None
-            if hasattr(self, "room_rects"):
-                for r in getattr(self, "room_rects", []):
-                    start_pos = r.topleft
-                    break
+            # prefer explicit start_pos passed into resolver
+            if start_pos is None:
+                start_pos = None
+                if hasattr(self, "room_rects"):
+                    for r in getattr(self, "room_rects", []):
+                        start_pos = r.topleft
+                        break
         except Exception:
             start_pos = None
         if start_pos is not None:
@@ -674,7 +994,8 @@ class GameEngine:
                 self._move_to_discard(card, start_pos)
             except Exception:
                 try:
-                    self.discard.append(card)
+                    if isinstance(card, Card):
+                        self.discard.append(card)
                 except Exception:
                     pass
         else:
@@ -682,7 +1003,8 @@ class GameEngine:
                 self._move_to_discard(card)
             except Exception:
                 try:
-                    self.discard.append(card)
+                    if isinstance(card, Card):
+                        self.discard.append(card)
                 except Exception:
                     pass
         return {"action": "barehand", "damage": monster_value}
@@ -776,21 +1098,30 @@ class GameEngine:
             self.room_rects.append(rect)
             x += card_w + spacing
 
-        # Skip button (replaces keyboard hint). The button is enabled when
-        # the player may avoid the room: room has 4 cards and they haven't
-        # already avoided nor interacted with the room yet.
+        # Skip button (replaces keyboard hint). Use spritesheet-backed NinePatchButton
         bw = 160
         bh = 44
         bx = 16
         by = max(520, self.virtual_h - 120)
-        skip_rect = pygame.Rect(bx, by, bw, bh)
         skip_enabled = (len(self.room) >= 4) and (not self.previous_avoided) and (not getattr(self, "room_interacted", False))
-        color = (40, 120, 40) if skip_enabled else (70, 70, 70)
-        pygame.draw.rect(surf, color, skip_rect)
-        lbl = font.render("Skip Room", False, (255, 255, 255))
-        surf.blit(lbl, (bx + 12, by + (bh - lbl.get_height()) // 2))
-        # expose skip button hitbox for input handling
-        self.ui_buttons["skip_room"] = (skip_rect, skip_enabled)
+        # Attempt to draw from atlas + mapping (best-effort); fall back to plain rect
+        skip_rect = pygame.Rect(bx, by, bw, bh)
+        # Prefer atlas-backed NinePatchButton when available, but use cached button
+        btn = None
+        try:
+            btn = self._get_or_create_ninepatch_button("skip_room", "button_normal", (bx, by), (bw, bh), "Skip Room", font)
+        except Exception:
+            btn = None
+        if btn is not None:
+            btn.draw(surf)
+            skip_rect = btn.rect
+            self.ui_buttons["skip_room"] = (skip_rect, skip_enabled)
+        else:
+            color = (40, 120, 40) if skip_enabled else (70, 70, 70)
+            pygame.draw.rect(surf, color, skip_rect)
+            lbl = font.render("Skip Room", False, (255, 255, 255))
+            surf.blit(lbl, (bx + 12, by + (bh - lbl.get_height()) // 2))
+            self.ui_buttons["skip_room"] = (skip_rect, skip_enabled)
 
         # Draw equipped weapon art and stacked monsters
         sw, sh = surf.get_size()
@@ -847,13 +1178,53 @@ class GameEngine:
         cnt_pos = (deck_rect.right + 8, deck_rect.top + (card_h - cnt_s.get_height()) // 2)
         surf.blit(cnt_s, cnt_pos)
 
-        # discard: show the most recent interaction that is not the currently equipped weapon
+        # discard: Prefer the most recent actually-discarded card (from
+        # self.discard) so that a card only appears here after the discard
+        # animation has completed. Fall back to the last-interaction history
+        # if nothing has been discarded yet.
         last = None
-        for c in reversed(getattr(self, "_interaction_history", [])):
-            if self.equipped_weapon and c == self.equipped_weapon.get("card"):
-                continue
-            last = c
-            break
+        try:
+            if getattr(self, "discard", None):
+                for c in reversed(self.discard):
+                    if self.equipped_weapon and c == self.equipped_weapon.get("card"):
+                        continue
+                    last = c
+                    break
+        except Exception:
+            last = None
+
+        if last is None:
+            # If there is a discard animation in-flight (active or queued)
+            # for a given card, avoid showing that card from the interaction
+            # history as the discard visual — it will appear in `self.discard`
+            # once the animation completes. Build a set of card ids that are
+            # currently animating to discard and skip them when falling back
+            # to interaction history.
+            animating_ids = set()
+            try:
+                a = getattr(self, "_active_anim", None)
+                if a and a.get("type") == "discard" and a.get("card") is not None:
+                    animating_ids.add(id(a.get("card")))
+            except Exception:
+                pass
+            try:
+                for a in getattr(self, "_anim_queue", ()):  # queued animations
+                    if a and a.get("type") == "discard" and a.get("card") is not None:
+                        animating_ids.add(id(a.get("card")))
+            except Exception:
+                pass
+
+            for c in reversed(getattr(self, "_interaction_history", [])):
+                if self.equipped_weapon and c == self.equipped_weapon.get("card"):
+                    continue
+                try:
+                    if id(c) in animating_ids:
+                        # skip any card that is currently animating into discard
+                        continue
+                except Exception:
+                    pass
+                last = c
+                break
 
         # place discard pile at bottom-right of the gameplay area (virtual surface)
         pad = self.right_pad
@@ -909,13 +1280,22 @@ class GameEngine:
             overlay = pygame.Surface((self.virtual_w, self.virtual_h), pygame.SRCALPHA)
             overlay.fill((0, 0, 0, 180))
             surf.blit(overlay, (0, 0))
-            # central pause menu
+            # central pause menu (draw framed window if atlas available)
             menu_w = 360
             menu_h = 260
             mx = (self.virtual_w - menu_w) // 2
             my = (self.virtual_h - menu_h) // 2
-            pygame.draw.rect(surf, (30, 30, 30), (mx, my, menu_w, menu_h))
-            pygame.draw.rect(surf, (140, 140, 140), (mx, my, menu_w, menu_h), 2)
+            # Try to draw a window frame from atlas
+            try:
+                frame_btn = self._get_or_create_ninepatch_button("pause_frame", "window_frame", (mx - 8, my - 8), (menu_w + 16, menu_h + 16), "", font)
+                if frame_btn:
+                    frame_btn.draw(surf)
+                else:
+                    pygame.draw.rect(surf, (30, 30, 30), (mx, my, menu_w, menu_h))
+                    pygame.draw.rect(surf, (140, 140, 140), (mx, my, menu_w, menu_h), 2)
+            except Exception:
+                pygame.draw.rect(surf, (30, 30, 30), (mx, my, menu_w, menu_h))
+                pygame.draw.rect(surf, (140, 140, 140), (mx, my, menu_w, menu_h), 2)
             title = big.render("Paused", False, (240, 240, 240))
             surf.blit(title, (mx + (menu_w - title.get_width()) // 2, my + 14))
 
@@ -923,23 +1303,42 @@ class GameEngine:
             btn_h = 44
             btn_x = mx + (menu_w - btn_w) // 2
             btn_y = my + 64
-            # Resume
-            resume_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
-            pygame.draw.rect(surf, (50, 120, 50), resume_rect)
-            r_lbl = font.render("Resume", False, (255, 255, 255))
-            surf.blit(r_lbl, (resume_rect.left + (btn_w - r_lbl.get_width()) // 2, resume_rect.top + 10))
+            # Resume / Settings / Main Menu - try to use atlas-backed buttons
+            # We'll try to use the same 'button_normal' tile for all, rendering text per-button.
+            # Use cached atlas-backed buttons where possible
+            resume_btn = self._get_or_create_ninepatch_button("pause_resume", "button_normal", (btn_x, btn_y), (btn_w, btn_h), "Resume", font)
+            if resume_btn:
+                resume_btn.draw(surf)
+                resume_rect = resume_btn.rect
+            else:
+                resume_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
+                pygame.draw.rect(surf, (50, 120, 50), resume_rect)
+                r_lbl = font.render("Resume", False, (255, 255, 255))
+                surf.blit(r_lbl, (resume_rect.left + (btn_w - r_lbl.get_width()) // 2, resume_rect.top + 10))
+
             # Settings
             btn_y += btn_h + 12
-            settings_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
-            pygame.draw.rect(surf, (70, 70, 120), settings_rect)
-            s_lbl = font.render("Settings", False, (255, 255, 255))
-            surf.blit(s_lbl, (settings_rect.left + (btn_w - s_lbl.get_width()) // 2, settings_rect.top + 10))
+            settings_btn = self._get_or_create_ninepatch_button("pause_settings", "button_normal", (btn_x, btn_y), (btn_w, btn_h), "Settings", font)
+            if settings_btn:
+                settings_btn.draw(surf)
+                settings_rect = settings_btn.rect
+            else:
+                settings_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
+                pygame.draw.rect(surf, (70, 70, 120), settings_rect)
+                s_lbl = font.render("Settings", False, (255, 255, 255))
+                surf.blit(s_lbl, (settings_rect.left + (btn_w - s_lbl.get_width()) // 2, settings_rect.top + 10))
+
             # Main Menu
             btn_y += btn_h + 12
-            main_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
-            pygame.draw.rect(surf, (140, 40, 40), main_rect)
-            m_lbl = font.render("Main Menu", False, (255, 255, 255))
-            surf.blit(m_lbl, (main_rect.left + (btn_w - m_lbl.get_width()) // 2, main_rect.top + 10))
+            main_btn = self._get_or_create_ninepatch_button("pause_mainmenu", "button_normal", (btn_x, btn_y), (btn_w, btn_h), "Main Menu", font)
+            if main_btn:
+                main_btn.draw(surf)
+                main_rect = main_btn.rect
+            else:
+                main_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
+                pygame.draw.rect(surf, (140, 40, 40), main_rect)
+                m_lbl = font.render("Main Menu", False, (255, 255, 255))
+                surf.blit(m_lbl, (main_rect.left + (btn_w - m_lbl.get_width()) // 2, main_rect.top + 10))
 
             # expose pause buttons for input handling
             self.ui_buttons["pause_resume"] = (resume_rect, True)
@@ -984,15 +1383,25 @@ class GameEngine:
                     allowed_weapon = (monster.value <= last)
 
             use_rect = pygame.Rect(bx, by, bw, bh)
-            color = (40, 120, 40) if allowed_weapon else (70, 70, 70)
-            pygame.draw.rect(surf, color, use_rect)
-            u_txt = font.render("Use Weapon", False, (255, 255, 255))
-            surf.blit(u_txt, (bx + 18, by + 12))
-
             bare_rect = pygame.Rect(bx + bw + 16, by, bw, bh)
-            pygame.draw.rect(surf, (120, 40, 40), bare_rect)
-            b_txt = font.render("Barehand", False, (255, 255, 255))
-            surf.blit(b_txt, (bx + bw + 34, by + 12))
+            # Create cached buttons if atlas is available
+            btn_use = self._get_or_create_ninepatch_button("pending_use", "button_normal", (use_rect.left, use_rect.top), (bw, bh), "Use Weapon", font)
+            btn_bare = self._get_or_create_ninepatch_button("pending_bare", "button_normal", (bare_rect.left, bare_rect.top), (bw, bh), "Barehand", font)
+            if btn_use and btn_bare:
+                # draw them and update rects
+                # visually disable the 'use' button if not allowed by tinting fallback is not implemented; keep enabled flag
+                btn_use.draw(surf)
+                use_rect = btn_use.rect
+                btn_bare.draw(surf)
+                bare_rect = btn_bare.rect
+            else:
+                color = (40, 120, 40) if allowed_weapon else (70, 70, 70)
+                pygame.draw.rect(surf, color, use_rect)
+                u_txt = font.render("Use Weapon", False, (255, 255, 255))
+                surf.blit(u_txt, (bx + 18, by + 12))
+                pygame.draw.rect(surf, (120, 40, 40), bare_rect)
+                b_txt = font.render("Barehand", False, (255, 255, 255))
+                surf.blit(b_txt, (bx + bw + 34, by + 12))
 
             self.ui_buttons["use_weapon"] = (use_rect, allowed_weapon)
             self.ui_buttons["barehand"] = (bare_rect, True)
@@ -1058,8 +1467,20 @@ class GameEngine:
         # main loop for the game
         running = True
         # prepare first room
-        self.prepare_room()
-        self.used_potion_this_turn = False
+        try:
+            self.prepare_room()
+        except Exception:
+            pass
+        try:
+            self._reset_used_potion_flag("start_run")
+        except Exception:
+            try:
+                self._reset_used_potion_flag("start_run_fallback")
+            except Exception:
+                try:
+                    self.used_potion_this_turn = False
+                except Exception:
+                    pass
         while running:
             self.clock.tick(30)
             for ev in pygame.event.get():
@@ -1114,13 +1535,13 @@ class GameEngine:
                                 self.avoid_room()
                                 # refill next room
                                 self.prepare_room()
-                                self.used_potion_this_turn = False
+                                self._reset_used_potion_flag("key_a_avoid")
                         except Exception:
                             # defensive: fall back to allowing avoid
                             try:
                                 self.avoid_room()
                                 self.prepare_room()
-                                self.used_potion_this_turn = False
+                                self._reset_used_potion_flag("key_a_avoid_fallback")
                             except Exception:
                                 pass
                     if ev.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4):
@@ -1132,13 +1553,14 @@ class GameEngine:
                                     start = self.room_rects[idx].topleft
                             except Exception:
                                 start = None
-                            res = self.face_card(idx, start_pos=start)
+                            # we don't need the returned value here; call for side-effects
+                            self.face_card(idx, start_pos=start)
                             # after facing 3 cards in a turn, fill up for next turn
                             # simplistic approach: if room has exactly 1 card left then end turn
                             # reset potion usage at start of next turn
                             if len(self.room) == 1:
                                 self.prepare_room()
-                                self.used_potion_this_turn = False
+                                self._reset_used_potion_flag("key_face_refill")
                 if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                     mx, my = ev.pos
                     # map display coords to virtual coords using last render mapping
@@ -1200,7 +1622,7 @@ class GameEngine:
                                 try:
                                     self.avoid_room()
                                     self.prepare_room()
-                                    self.used_potion_this_turn = False
+                                    self._reset_used_potion_flag("mouse_skip_avoid")
                                 except Exception:
                                     pass
                                 continue
@@ -1223,7 +1645,7 @@ class GameEngine:
                                     self.pending_combat = None
                                     if len(self.room) == 1:
                                         self.prepare_room()
-                                        self.used_potion_this_turn = False
+                                        self._reset_used_potion_flag("pending_use_refill")
                                     continue
                             if bare_info:
                                 bare_rect, _ = bare_info
@@ -1239,7 +1661,7 @@ class GameEngine:
                                     self.pending_combat = None
                                     if len(self.room) == 1:
                                         self.prepare_room()
-                                        self.used_potion_this_turn = False
+                                        self._reset_used_potion_flag("pending_bare_refill")
                                     continue
 
                     # otherwise check clicks on room cards (virtual coords)
@@ -1289,7 +1711,7 @@ class GameEngine:
                                 # after any face action that leaves 1 card, refill
                                 if len(self.room) == 1:
                                     self.prepare_room()
-                                    self.used_potion_this_turn = False
+                                    self._reset_used_potion_flag("mouse_face_refill")
                             else:
                                 # non-monster: immediate action
                                 start = None
@@ -1301,7 +1723,7 @@ class GameEngine:
                                 self.face_card(i, start_pos=start)
                                 if len(self.room) == 1:
                                     self.prepare_room()
-                                    self.used_potion_this_turn = False
+                                    self._reset_used_potion_flag("mouse_face_refill_nonmonster")
                             break
 
             self.render()
