@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "scoundrel"
+version = "0.1.0"
+description = "A card game built with pygame featuring score tracking, unlockable card types, and difficulty settings."
+authors = ["Your Name <youremail@example.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.7"
+pygame = "^2.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
