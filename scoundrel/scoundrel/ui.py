@@ -14,6 +14,14 @@ TITLE_GAP = 36
 
 FONT_NAME = None  # None uses default pygame font; set to a path in assets if you want
 
+# Attempt to prefer bundled DungeonFont.ttf in assets/ui if present
+try:
+    DEFAULT_FONT_PATH = Path(__file__).resolve().parents[1] / "assets" / "ui" / "DungeonFont.ttf"
+    if not DEFAULT_FONT_PATH.exists():
+        DEFAULT_FONT_PATH = None
+except Exception:
+    DEFAULT_FONT_PATH = None
+
 
 class Button:
     def __init__(self, rect, text, enabled=True, action: Optional[str] = None):
@@ -32,7 +40,7 @@ class Button:
         # border
         pygame.draw.rect(surf, (200, 200, 200), self.rect, width=2, border_radius=8)
         # text
-        txt = font.render(self.text, True, (240, 240, 240) if self.enabled else (160, 160, 160))
+        txt = font.render(self.text, False, (240, 240, 240) if self.enabled else (160, 160, 160))
         txt_rect = txt.get_rect(center=self.rect.center)
         surf.blit(txt, txt_rect)
         # if disabled, draw strike-through
@@ -70,21 +78,28 @@ class Menu:
     def _setup_fonts(self):
         # Prefer bundled font if present, otherwise use pygame default
         try:
+            # priority: explicit FONT_NAME -> bundled DungeonFont.ttf -> system font
             if FONT_NAME:
                 font_path = Path(FONT_NAME)
                 self.title_font = pygame.font.Font(str(font_path), 64)
                 self.btn_font = pygame.font.Font(str(font_path), 28)
+            elif DEFAULT_FONT_PATH:
+                self.title_font = pygame.font.Font(str(DEFAULT_FONT_PATH), 64)
+                self.btn_font = pygame.font.Font(str(DEFAULT_FONT_PATH), 28)
             else:
-                self.title_font = pygame.font.SysFont(None, 64)
-                self.btn_font = pygame.font.SysFont(None, 28)
+                self.title_font = pygame.font.Font(None, 64)
+                self.btn_font = pygame.font.Font(None, 28)
         except Exception:
-            self.title_font = pygame.font.SysFont(None, 64)
-            self.btn_font = pygame.font.SysFont(None, 28)
+            self.title_font = pygame.font.Font(None, 64)
+            self.btn_font = pygame.font.Font(None, 28)
         # shared small font used for non-menu UI (game over / score display)
         try:
-            self.font = pygame.font.Font(None, 36)
+            if DEFAULT_FONT_PATH:
+                self.font = pygame.font.Font(str(DEFAULT_FONT_PATH), 36)
+            else:
+                self.font = pygame.font.Font(None, 36)
         except Exception:
-            self.font = pygame.font.SysFont(None, 36)
+            self.font = pygame.font.Font(None, 36)
 
     def _create_buttons(self):
         w, h = self.screen.get_size()
@@ -178,7 +193,7 @@ class Menu:
         else:
             self.screen.fill((18, 18, 18))
         # Title
-        title_surf = self.title_font.render(self.title, True, (235, 220, 120))
+        title_surf = self.title_font.render(self.title, False, (235, 220, 120))
         title_rect = title_surf.get_rect(center=(w // 2, SCREEN_PADDING_TOP // 2 + 10))
         self.screen.blit(title_surf, title_rect)
         # Buttons
@@ -187,17 +202,17 @@ class Menu:
 
     def draw_game_over(self, score):
         self.screen.fill((0, 0, 0))
-        game_over_surface = self.font.render("Game Over", True, (255, 0, 0))
+        game_over_surface = self.font.render("Game Over", False, (255, 0, 0))
         self.screen.blit(game_over_surface, (self.screen.get_width() // 2 - game_over_surface.get_width() // 2, 100))
 
-        score_surface = self.font.render(f"Your Score: {score}", True, (255, 255, 255))
+        score_surface = self.font.render(f"Your Score: {score}", False, (255, 255, 255))
         self.screen.blit(score_surface, (self.screen.get_width() // 2 - score_surface.get_width() // 2, 200))
 
-        restart_surface = self.font.render("SPACE to Return to Menu", True, (255, 255, 255))
+        restart_surface = self.font.render("SPACE to Return to Menu", False, (255, 255, 255))
         self.screen.blit(restart_surface, (self.screen.get_width() // 2 - restart_surface.get_width() // 2, 300))
 
         pygame.display.flip()
 
     def update_score_display(self, score, high_score):
-        score_surface = self.font.render(f"Score: {score}  High Score: {high_score}", True, (255, 255, 255))
+        score_surface = self.font.render(f"Score: {score}  High Score: {high_score}", False, (255, 255, 255))
         self.screen.blit(score_surface, (10, 10))

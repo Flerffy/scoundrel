@@ -126,6 +126,39 @@ class GameEngine:
             # best-effort; leave _sfx possibly empty
             pass
 
+        # try to locate a bundled UI font (DungeonFont.ttf) in assets/ui
+        try:
+            fp = Path(__file__).resolve().parents[1] / "assets" / "ui" / "DungeonFont.ttf"
+            if fp.exists():
+                self._font_path = str(fp)
+            else:
+                self._font_path = None
+        except Exception:
+            self._font_path = None
+        # simple cache for pygame.font.Font objects by size
+        self._font_cache = {}
+
+    def get_font(self, size: int):
+        """Return a cached pygame.font.Font at the requested size. Falls back to SysFont on error."""
+        try:
+            if getattr(self, "_font_cache", None) is None:
+                self._font_cache = {}
+            if size in self._font_cache:
+                return self._font_cache[size]
+            if getattr(self, "_font_path", None):
+                try:
+                    f = pygame.font.Font(self._font_path, size)
+                    self._font_cache[size] = f
+                    return f
+                except Exception:
+                    pass
+            # fallback to default pygame font if no bundled font is available
+            f = pygame.font.Font(None, size)
+            self._font_cache[size] = f
+            return f
+        except Exception:
+            return pygame.font.Font(None, size)
+
     def _play_sfx(self, key: str):
         """Play a named sfx if available (safe/no-raise)."""
         try:
@@ -688,9 +721,9 @@ class GameEngine:
         else:
             surf.fill((24, 24, 24))
         # Health
-        font = pygame.font.SysFont(None, 28)
-        big = pygame.font.SysFont(None, 40)
-        h_surf = big.render(f"Health: {self.health}", True, (220, 220, 220))
+        font = self.get_font(28)
+        big = self.get_font(40)
+        h_surf = big.render(f"Health: {self.health}", False, (220, 220, 220))
         surf.blit(h_surf, (16, 16))
         # (Removed: top-left dungeon/discard counts and weapon text per UI change)
 
@@ -738,7 +771,7 @@ class GameEngine:
                 if art_surf:
                     surf.blit(art_surf, rect.topleft)
                 else:
-                    txt = font.render(f"{i+1}: {c.rank} {c.suit}", True, (240, 240, 240))
+                    txt = font.render(f"{i+1}: {c.rank} {c.suit}", False, (240, 240, 240))
                     surf.blit(txt, (x + 8, y + 8))
             self.room_rects.append(rect)
             x += card_w + spacing
@@ -754,7 +787,7 @@ class GameEngine:
         skip_enabled = (len(self.room) >= 4) and (not self.previous_avoided) and (not getattr(self, "room_interacted", False))
         color = (40, 120, 40) if skip_enabled else (70, 70, 70)
         pygame.draw.rect(surf, color, skip_rect)
-        lbl = font.render("Skip Room", True, (255, 255, 255))
+        lbl = font.render("Skip Room", False, (255, 255, 255))
         surf.blit(lbl, (bx + 12, by + (bh - lbl.get_height()) // 2))
         # expose skip button hitbox for input handling
         self.ui_buttons["skip_room"] = (skip_rect, skip_enabled)
@@ -774,7 +807,7 @@ class GameEngine:
             if w_art:
                 surf.blit(w_art, (wx, wy))
             else:
-                wtxt = font.render(f"{wc.rank} {wc.suit}", True, (220, 220, 220))
+                wtxt = font.render(f"{wc.rank} {wc.suit}", False, (220, 220, 220))
                 pygame.draw.rect(surf, (40, 40, 40), self.weapon_rect)
                 surf.blit(wtxt, (wx + 8, wy + 8))
 
@@ -790,7 +823,7 @@ class GameEngine:
                 if m_art:
                     surf.blit(m_art, (sx, offy))
                 else:
-                    mtxt = font.render(f"{m.rank}", True, (240, 240, 240))
+                    mtxt = font.render(f"{m.rank}", False, (240, 240, 240))
                     pygame.draw.rect(surf, (60, 60, 60), (sx, offy, small_w, small_h))
                     surf.blit(mtxt, (sx + 4, offy + 4))
         # Draw Deck (face-down) and Discard (last-interacted card)
@@ -810,7 +843,7 @@ class GameEngine:
             pygame.draw.rect(surf, (100, 100, 100), deck_rect, 2)
 
         # overlay deck count to the right of the deck
-        cnt_s = font.render(str(len(self.deck)), True, (220, 220, 220))
+        cnt_s = font.render(str(len(self.deck)), False, (220, 220, 220))
         cnt_pos = (deck_rect.right + 8, deck_rect.top + (card_h - cnt_s.get_height()) // 2)
         surf.blit(cnt_s, cnt_pos)
 
@@ -833,7 +866,7 @@ class GameEngine:
                 surf.blit(d_art, discard_rect.topleft)
             else:
                 pygame.draw.rect(surf, (60, 60, 60), discard_rect)
-                lbl = font.render(f"{last.rank} {last.suit}", True, (240, 240, 240))
+                lbl = font.render(f"{last.rank} {last.suit}", False, (240, 240, 240))
                 surf.blit(lbl, (discard_rect.left + 6, discard_rect.top + 6))
         else:
             # show empty discard slot
@@ -883,7 +916,7 @@ class GameEngine:
             my = (self.virtual_h - menu_h) // 2
             pygame.draw.rect(surf, (30, 30, 30), (mx, my, menu_w, menu_h))
             pygame.draw.rect(surf, (140, 140, 140), (mx, my, menu_w, menu_h), 2)
-            title = big.render("Paused", True, (240, 240, 240))
+            title = big.render("Paused", False, (240, 240, 240))
             surf.blit(title, (mx + (menu_w - title.get_width()) // 2, my + 14))
 
             btn_w = 260
@@ -893,19 +926,19 @@ class GameEngine:
             # Resume
             resume_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
             pygame.draw.rect(surf, (50, 120, 50), resume_rect)
-            r_lbl = font.render("Resume", True, (255, 255, 255))
+            r_lbl = font.render("Resume", False, (255, 255, 255))
             surf.blit(r_lbl, (resume_rect.left + (btn_w - r_lbl.get_width()) // 2, resume_rect.top + 10))
             # Settings
             btn_y += btn_h + 12
             settings_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
             pygame.draw.rect(surf, (70, 70, 120), settings_rect)
-            s_lbl = font.render("Settings", True, (255, 255, 255))
+            s_lbl = font.render("Settings", False, (255, 255, 255))
             surf.blit(s_lbl, (settings_rect.left + (btn_w - s_lbl.get_width()) // 2, settings_rect.top + 10))
             # Main Menu
             btn_y += btn_h + 12
             main_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
             pygame.draw.rect(surf, (140, 40, 40), main_rect)
-            m_lbl = font.render("Main Menu", True, (255, 255, 255))
+            m_lbl = font.render("Main Menu", False, (255, 255, 255))
             surf.blit(m_lbl, (main_rect.left + (btn_w - m_lbl.get_width()) // 2, main_rect.top + 10))
 
             # expose pause buttons for input handling
@@ -924,12 +957,12 @@ class GameEngine:
             sy = (self.virtual_h - sh) // 2
             pygame.draw.rect(surf, (28, 28, 28), (sx, sy, sw, sh))
             pygame.draw.rect(surf, (140, 140, 140), (sx, sy, sw, sh), 2)
-            t = big.render("Settings", True, (240, 240, 240))
+            t = big.render("Settings", False, (240, 240, 240))
             surf.blit(t, (sx + (sw - t.get_width()) // 2, sy + 16))
             # Back button
             back_rect = pygame.Rect(sx + (sw - 200) // 2, sy + sh - 70, 200, 48)
             pygame.draw.rect(surf, (90, 90, 90), back_rect)
-            btxt = font.render("Back", True, (255, 255, 255))
+            btxt = font.render("Back", False, (255, 255, 255))
             surf.blit(btxt, (back_rect.left + (200 - btxt.get_width()) // 2, back_rect.top + 10))
             self.ui_buttons["settings_back"] = (back_rect, True)
 
@@ -953,12 +986,12 @@ class GameEngine:
             use_rect = pygame.Rect(bx, by, bw, bh)
             color = (40, 120, 40) if allowed_weapon else (70, 70, 70)
             pygame.draw.rect(surf, color, use_rect)
-            u_txt = font.render("Use Weapon", True, (255, 255, 255))
+            u_txt = font.render("Use Weapon", False, (255, 255, 255))
             surf.blit(u_txt, (bx + 18, by + 12))
 
             bare_rect = pygame.Rect(bx + bw + 16, by, bw, bh)
             pygame.draw.rect(surf, (120, 40, 40), bare_rect)
-            b_txt = font.render("Barehand", True, (255, 255, 255))
+            b_txt = font.render("Barehand", False, (255, 255, 255))
             surf.blit(b_txt, (bx + bw + 34, by + 12))
 
             self.ui_buttons["use_weapon"] = (use_rect, allowed_weapon)
@@ -1277,8 +1310,8 @@ class GameEngine:
             if self.is_game_over():
                 score = self.compute_score()
                 # show final message for a moment and return to menu
-                font = pygame.font.SysFont(None, 48)
-                msg = font.render(f"Game Over - Score: {score}", True, (255, 200, 80))
+                font = self.get_font(48)
+                msg = font.render(f"Game Over - Score: {score}", False, (255, 200, 80))
                 # draw message directly to the real display (centered)
                 disp_w, disp_h = self.display.get_size()
                 mx = disp_w // 2 - msg.get_width() // 2
