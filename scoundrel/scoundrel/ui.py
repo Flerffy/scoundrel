@@ -156,6 +156,7 @@ class Menu:
             ("New Game", True, "new"),
             ("Custom Game (placeholder)", False, None),  # disabled
             ("Settings", True, "settings"),
+            ("Credits", True, "credits"),
             ("Quit", True, "quit"),
         ]
 
@@ -262,6 +263,14 @@ class Menu:
                 if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                     for btn in self.buttons:
                         if btn.rect.collidepoint(ev.pos) and btn.clicked():
+                            # Special-case credits: show credits screen and continue the menu
+                            if btn.action == "credits":
+                                try:
+                                    self._show_credits()
+                                except Exception:
+                                    # swallow errors from credits display and continue
+                                    pass
+                                break
                             result = btn.action
                             running = False
                             break
@@ -273,6 +282,97 @@ class Menu:
             self._draw()
             pygame.display.flip()
         return result
+
+    def _show_credits(self):
+        """Display the credits screen. Reads from assets/credits.txt (editable).
+        Returns when the user presses any key or clicks the mouse.
+        """
+        # load credits text
+        credits_path = Path(__file__).resolve().parents[1] / "assets" / "credits.txt"
+        if credits_path.exists():
+            try:
+                raw = credits_path.read_text(encoding="utf-8")
+            except Exception:
+                raw = "(Unable to read credits file)"
+        else:
+            raw = "No credits file found. Please create assets/credits.txt to edit this screen."
+
+        lines = []
+        for l in raw.splitlines():
+            if l.strip() == "":
+                lines.append("")
+            else:
+                lines.append(l.rstrip())
+
+        # simple credits display loop
+        showing = True
+        clock = pygame.time.Clock()
+        while showing:
+            clock.tick(60)
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
+                    # propagate quit by raising SystemExit to let caller handle
+                    raise SystemExit()
+                if ev.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+                    showing = False
+
+            # draw background similar to menu
+            w, h = self.screen.get_size()
+            tile = getattr(self, "_bg_tile", None)
+            if tile is not None:
+                tw, th = tile.get_size()
+                # reuse cached scaled tile if available
+                # compute scale like _draw to match tiling
+                cw, ch = (120, 180)
+                virtual_w = 16 + (cw + 16) * 4 + 16 + cw + 16
+                virtual_h = max(640, 150 + ch + 200)
+                scale = min(max(1, w // virtual_w), max(1, h // virtual_h)) if virtual_w and virtual_h else 1
+                cached = self._bg_tile_scaled_cache.get(scale)
+                if cached is None:
+                    try:
+                        cached = pygame.transform.scale(tile, (tw * scale, th * scale))
+                    except Exception:
+                        cached = tile
+                    self._bg_tile_scaled_cache[scale] = cached
+                ttw, tth = cached.get_size()
+                dx = (w - virtual_w * scale) // 2
+                dy = (h - virtual_h * scale) // 2
+                off_x = dx % ttw
+                off_y = dy % tth
+                start_x = off_x
+                start_y = off_y
+                if start_x > 0:
+                    start_x -= ttw
+                if start_y > 0:
+                    start_y -= tth
+                for yy in range(start_y, h, tth):
+                    for xx in range(start_x, w, ttw):
+                        self.screen.blit(cached, (xx, yy))
+            else:
+                self.screen.fill((10, 10, 10))
+
+            # title
+            title = self.title_font.render("Credits", False, (235, 220, 120))
+            self.screen.blit(title, title.get_rect(center=(w // 2, 72)))
+
+            # render credits lines
+            y = 120
+            pad = 6
+            for ln in lines:
+                # wrap long lines crudely by clipping; user can insert line breaks
+                surf = self.font.render(ln, False, (240, 240, 240)) if ln != "" else None
+                if surf:
+                    r = surf.get_rect(center=(w // 2, y))
+                    self.screen.blit(surf, r)
+                    y += surf.get_height() + pad
+                else:
+                    y += self.font.get_linesize() // 2
+
+            # prompt
+            prompt = self.btn_font.render("Press any key or click to return", False, (200, 200, 200))
+            self.screen.blit(prompt, prompt.get_rect(center=(w // 2, h - 60)))
+
+            pygame.display.flip()
 
     def _draw(self):
         w, h = self.screen.get_size()

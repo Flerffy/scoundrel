@@ -1,0 +1,12 @@
+Scoundrel
+
+Game Developer: Zach Gage
+Game Co-Developer: Kurt Bieg
+Programmer: Erik Tyrson
+UI: Erik Tyrson
+Art: FagelTomten
+Font: Vrtxrry
+Sound Effects: LeohPaz
+Music: LeohPaz
+
+Thanks for playing!
