@@ -1,5 +1,6 @@
 import pygame
 import json
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -438,6 +439,152 @@ class Menu:
         self.screen.blit(restart_surface, (self.screen.get_width() // 2 - restart_surface.get_width() // 2, 300))
 
         pygame.display.flip()
+
+    def _show_settings(self):
+        """Display a simple settings screen with 3 sliders: Master, BGM, SFX.
+
+        Adjusts pygame.mixer.music volume for BGM and uses audio_settings
+        to propagate changes to runtime sfx playback.
+        """
+        # lazy import of audio settings (best-effort)
+        try:
+            from .utils.audio_settings import get_master, get_bgm, get_sfx, set_master, set_bgm, set_sfx
+        except Exception:
+            # provide local fallbacks that do nothing
+            def get_master():
+                return 1.0
+            def get_bgm():
+                return 0.5
+            def get_sfx():
+                return 0.9
+            def set_master(v):
+                pass
+            def set_bgm(v):
+                pass
+            def set_sfx(v):
+                pass
+
+        # slider geometry in screen coords
+        w, h = self.screen.get_size()
+        box_w = min(680, w - 120)
+        box_h = 360
+        bx = (w - box_w) // 2
+        by = (h - box_h) // 2
+
+        # reserve space on the right of sliders for the numeric value
+        value_area = 80
+
+        def slider_rect(i):
+            # three vertical positions
+            pad_top = 96
+            spacing = 64
+            sx = bx + 36
+            # leave room for value text inside the box
+            sw = box_w - 72 - value_area
+            sy = by + pad_top + i * spacing
+            sh = 18
+            return (sx, sy, sw, sh)
+
+        dragging = None
+        clock = pygame.time.Clock()
+        running = True
+        while running:
+            dt = clock.tick(60) / 1000.0
+            t = pygame.time.get_ticks() / 1000.0
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
+                    raise SystemExit()
+                if ev.type == pygame.KEYDOWN:
+                    # any key exits settings
+                    running = False
+                if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                    mx, my = getattr(ev, 'pos', pygame.mouse.get_pos())
+                    for i, name in enumerate(("master", "bgm", "sfx")):
+                        sx, sy, sw, sh = slider_rect(i)
+                        r = pygame.Rect(sx, sy - 6, sw, sh + 12)
+                        if r.collidepoint(mx, my):
+                            dragging = name
+                            # update immediately on press
+                            rel = (mx - sx) / sw if sw > 0 else 0.0
+                            val = max(0.0, min(1.0, rel))
+                            try:
+                                if name == "master":
+                                    set_master(val)
+                                elif name == "bgm":
+                                    set_bgm(val)
+                                else:
+                                    set_sfx(val)
+                            except Exception:
+                                pass
+                            break
+                if ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+                    dragging = None
+                if ev.type == pygame.MOUSEMOTION and dragging is not None:
+                    mx, my = getattr(ev, 'pos', pygame.mouse.get_pos())
+                    i = ("master", "bgm", "sfx").index(dragging)
+                    sx, sy, sw, sh = slider_rect(i)
+                    rel = (mx - sx) / sw if sw > 0 else 0.0
+                    val = max(0.0, min(1.0, rel))
+                    try:
+                        if dragging == "master":
+                            set_master(val)
+                        elif dragging == "bgm":
+                            set_bgm(val)
+                        else:
+                            set_sfx(val)
+                    except Exception:
+                        pass
+
+            # draw background box
+            # tile/canvas background like menu
+            tile = getattr(self, "_bg_tile", None)
+            if tile is not None:
+                tw, th = tile.get_size()
+                # simple blit fill
+                for yy in range(0, h, th):
+                    for xx in range(0, w, tw):
+                        self.screen.blit(tile, (xx, yy))
+            else:
+                self.screen.fill((16, 16, 20))
+
+            # title
+            title = self.title_font.render("Settings", False, (235, 220, 120))
+            self.screen.blit(title, title.get_rect(center=(w // 2, by + 40)))
+
+            # draw box
+            pygame.draw.rect(self.screen, (24, 24, 24), (bx, by, box_w, box_h))
+            pygame.draw.rect(self.screen, (140, 140, 140), (bx, by, box_w, box_h), 2)
+
+            # slider labels and values
+            labels = [("Master", get_master()), ("BGM", get_bgm()), ("SFX", get_sfx())]
+            for i, (lbl, val) in enumerate(labels):
+                sx, sy, sw, sh = slider_rect(i)
+                # label
+                lab_surf = self.font.render(f"{lbl}", False, (220, 220, 220))
+                self.screen.blit(lab_surf, (sx, sy - 28))
+                # track background
+                pygame.draw.rect(self.screen, (60, 60, 60), (sx, sy, sw, sh), border_radius=8)
+                # filled
+                fill_w = int(sw * max(0.0, min(1.0, val)))
+                pygame.draw.rect(self.screen, (80, 160, 220), (sx, sy, fill_w, sh), border_radius=8)
+                # knob animation (pulse)
+                pulse = 1.0 + 0.15 * math.sin(t * 6.0 + i * 1.3)
+                kx = sx + max(0, min(sw, fill_w))
+                ky = sy + sh // 2
+                kr = int(max(6, min(14, 8 * pulse)))
+                pygame.draw.circle(self.screen, (220, 220, 220), (kx, ky), kr)
+                # value text drawn inside the box on the right
+                vtxt = self.font.render(f"{int(val*100)}%", False, (200, 200, 200))
+                v_x = bx + box_w - value_area + 8
+                v_y = sy - 6
+                # center value vertically with the slider
+                self.screen.blit(vtxt, (v_x, v_y))
+
+            # prompt
+            prompt = self.btn_font.render("Drag sliders or press any key / click to return", False, (200, 200, 200))
+            self.screen.blit(prompt, prompt.get_rect(center=(w // 2, by + box_h - 28)))
+
+            pygame.display.flip()
 
     def update_score_display(self, score, high_score):
         score_surface = self.font.render(f"Score: {score}  High Score: {high_score}", False, (255, 255, 255))

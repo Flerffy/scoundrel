@@ -50,6 +50,80 @@ except Exception:
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 from .utils.assets import CardArtManager
+# Best-effort runtime import for optional audio settings to avoid static analyzer
+# failures for relative imports; fall back to no-op helpers when unavailable.
+try:
+    import importlib
+
+    _audio_mod = None
+    if __package__:
+        try:
+            # try relative import using package context
+            _audio_mod = importlib.import_module(".utils.audio_settings", package=__package__)
+        except Exception:
+            try:
+                # fallback to importing from the package root
+                root = __package__.split(".")[0]
+                _audio_mod = importlib.import_module(f"{root}.utils.audio_settings")
+            except Exception:
+                _audio_mod = None
+    else:
+        # no package context; try top-level module
+        try:
+            _audio_mod = importlib.import_module("utils.audio_settings")
+        except Exception:
+            _audio_mod = None
+
+    if _audio_mod is not None:
+        get_master = getattr(_audio_mod, "get_master", lambda: 1.0)
+        get_sfx = getattr(_audio_mod, "get_sfx", lambda: 1.0)
+
+        # Retrieve the optional implementation if present, but wrap it to ensure
+        # a canonical signature that returns None so static checkers/types agree.
+        _apply_impl = getattr(_audio_mod, "apply_sfx_to_channel", None)
+        if callable(_apply_impl):
+            def apply_sfx_to_channel(channel, base_volume=1.0):
+                try:
+                    # Call the implementation and deliberately ignore its return value.
+                    _apply_impl(channel, base_volume)
+                except Exception:
+                    # Fallback behavior: if the channel exposes set_volume, call it.
+                    try:
+                        if channel is not None and hasattr(channel, "set_volume"):
+                            channel.set_volume(base_volume)
+                    except Exception:
+                        pass
+        else:
+            def apply_sfx_to_channel(channel, base_volume=1.0):
+                try:
+                    if channel is not None and hasattr(channel, "set_volume"):
+                        channel.set_volume(base_volume)
+                except Exception:
+                    pass
+
+        apply_music_volume = getattr(_audio_mod, "apply_music_volume", lambda: None)
+    else:
+        raise ImportError("optional audio_settings module not available")
+except Exception:
+    # best-effort fallback: define no-op functions
+    def get_master():
+        return 1.0
+    def get_sfx():
+        return 1.0
+    def apply_sfx_to_channel(channel, base_volume=1.0):
+        try:
+            if channel is not None:
+                try:
+                    channel.set_volume(base_volume)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    def apply_music_volume():
+        try:
+            pass
+        except Exception:
+            pass
 
 
 class GameEngine:
@@ -263,6 +337,8 @@ class GameEngine:
             surf_map = None
             try:
                 # If the semantic_tile is a button base name, look up alternate states
+                # ensure inset has a sensible default so static analyzers can't flag it as unbound
+                inset = (4, 4, 4, 4)
                 if semantic_tile.startswith("button"):
                     states = ["button_normal", "button_hover", "button_pressed"]
                     sm = {}
@@ -272,13 +348,17 @@ class GameEngine:
                         if s_surf is not None:
                             sm_key = sname.replace("button_", "")
                             sm[sm_key] = s_surf
-                            inset = s_inset
+                            # prefer a provided inset but fall back to the default if None
+                            if s_inset is not None:
+                                inset = s_inset
                             found = True
                     if found:
                         surf_map = sm
                 # fallback: single tile
                 if surf_map is None:
-                    surf, inset = self._get_atlas_tile(semantic_tile)
+                    surf, tile_inset = self._get_atlas_tile(semantic_tile)
+                    if tile_inset is not None:
+                        inset = tile_inset
                     if surf is None or NinePatchButton is None:
                         return None
                     btn = NinePatchButton(surf, inset, pos, size, font=font, text=text)
@@ -320,7 +400,28 @@ class GameEngine:
             snd = self._sfx.get(key) if hasattr(self, "_sfx") else None
             if snd:
                 try:
-                    snd.play()
+                    ch = snd.play()
+                    # Apply runtime volumes: master * sfx * base
+                    try:
+                        # use channel-based volume if available
+                        if ch is not None:
+                            # attempt to read base volume from the Sound object
+                            try:
+                                base = float(getattr(snd, "_base_volume", snd.get_volume()))
+                            except Exception:
+                                try:
+                                    base = float(snd.get_volume())
+                                except Exception:
+                                    base = 1.0
+                            apply_sfx_to_channel(ch, base_volume=base)
+                        else:
+                            # if no channel returned, attempt to set Sound volume as fallback
+                            try:
+                                snd.set_volume(get_sfx())
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 except Exception:
                     pass
         except Exception:
