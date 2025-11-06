@@ -2,7 +2,7 @@ import pygame
 import json
 import math
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable, cast
 
 # Attempt to import atlas-backed UI widgets when available
 NinePatchButton = None
@@ -71,13 +71,29 @@ except Exception:
 
 
 class Button:
-    def __init__(self, rect, text, enabled=True, action: Optional[str] = None):
+    def __init__(self, rect, text, enabled=True, action: Optional[str] = None, font=None):
         self.rect = pygame.Rect(rect)
         self.text = text
         self.enabled = enabled
         self.hover = False
         # explicit action attribute to keep static checkers happy
         self.action: Optional[str] = action
+        # pre-rendered label surfaces (enabled/disabled) to avoid per-frame rendering
+        self._label_enabled = None
+        self._label_disabled = None
+        try:
+            if font is not None:
+                try:
+                    self._label_enabled = font.render(self.text, False, (240, 240, 240))
+                except Exception:
+                    self._label_enabled = None
+                try:
+                    self._label_disabled = font.render(self.text, False, (160, 160, 160))
+                except Exception:
+                    self._label_disabled = None
+        except Exception:
+            self._label_enabled = None
+            self._label_disabled = None
 
     def draw(self, surf, font):
         base = (60, 60, 60) if self.enabled else (40, 40, 40)
@@ -86,10 +102,26 @@ class Button:
         pygame.draw.rect(surf, color, self.rect, border_radius=8)
         # border
         pygame.draw.rect(surf, (200, 200, 200), self.rect, width=2, border_radius=8)
-        # text
-        txt = font.render(self.text, False, (240, 240, 240) if self.enabled else (160, 160, 160))
-        txt_rect = txt.get_rect(center=self.rect.center)
-        surf.blit(txt, txt_rect)
+        # text (use cached surfaces if available)
+        try:
+            if self.enabled and self._label_enabled is not None:
+                lbl = self._label_enabled
+            elif (not self.enabled) and self._label_disabled is not None:
+                lbl = self._label_disabled
+            else:
+                lbl = None
+            if lbl is not None:
+                surf.blit(lbl, lbl.get_rect(center=self.rect.center))
+            else:
+                txt = font.render(self.text, False, (240, 240, 240) if self.enabled else (160, 160, 160))
+                txt_rect = txt.get_rect(center=self.rect.center)
+                surf.blit(txt, txt_rect)
+        except Exception:
+            try:
+                txt = font.render(self.text, False, (240, 240, 240) if self.enabled else (160, 160, 160))
+                surf.blit(txt, txt.get_rect(center=self.rect.center))
+            except Exception:
+                pass
         # if disabled, draw strike-through
         if not self.enabled:
             y = self.rect.centery
@@ -109,18 +141,27 @@ class Menu:
         self.clock = pygame.time.Clock()
         self._setup_fonts()
         self._create_buttons()
-        # try to load background tile for the menu
+        # Attempt to use a shared background tile and scaled-cache so menu,
+        # settings, and gameplay all tile and scale the same image.
         try:
-            bg_path = Path(__file__).resolve().parents[1] / "assets" / "backgrounds" / "ClassicBackground.png"
-            if bg_path.exists():
-                self._bg_tile = pygame.image.load(str(bg_path)).convert()
-            else:
+            from .utils.shared_bg import get_shared_bg_tile
+            try:
+                self._bg_tile, self._bg_tile_scaled_cache = get_shared_bg_tile()
+            except Exception:
                 self._bg_tile = None
+                self._bg_tile_scaled_cache = {}
         except Exception:
-            self._bg_tile = None
-        # cache for scaled tiles (keyed by integer scale) so menu and engine
-        # can reuse similarly-sized scaled tiles and avoid re-sampling differences
-        self._bg_tile_scaled_cache = {}
+            # fallback to previous per-instance behavior if helper isn't available
+            try:
+                bg_path = Path(__file__).resolve().parents[1] / "assets" / "backgrounds" / "ClassicBackground.png"
+                if bg_path.exists():
+                    # Avoid convert() to be robust against initialization order.
+                    self._bg_tile = pygame.image.load(str(bg_path))
+                else:
+                    self._bg_tile = None
+            except Exception:
+                self._bg_tile = None
+            self._bg_tile_scaled_cache = {}
 
     def _setup_fonts(self):
         # Prefer bundled font if present, otherwise use pygame default
@@ -236,13 +277,13 @@ class Menu:
                                 sm["hover"] = h_surf
                             if p_surf is not None:
                                 sm["pressed"] = p_surf
-                            btn = MenuAtlasButton(rect, text, enabled, action, NinePatchButton, sm, n_inset)
+                            btn = MenuAtlasButton(rect, text, enabled, action, NinePatchButton, sm, n_inset, font=self.btn_font)
                         else:
-                            btn = MenuAtlasButton(rect, text, enabled, action, NinePatchButton, n_surf, n_inset)
+                            btn = MenuAtlasButton(rect, text, enabled, action, NinePatchButton, n_surf, n_inset, font=self.btn_font)
                     else:
                         btn = Button(rect, text, enabled=enabled, action=action)
                 except Exception:
-                    btn = Button(rect, text, enabled=enabled, action=action)
+                    btn = Button(rect, text, enabled=enabled, action=action, font=self.btn_font)
             else:
                 btn = Button(rect, text, enabled=enabled, action=action)
             self.buttons.append(btn)
@@ -327,28 +368,34 @@ class Menu:
                 cw, ch = (120, 180)
                 virtual_w = 16 + (cw + 16) * 4 + 16 + cw + 16
                 virtual_h = max(640, 150 + ch + 200)
-                scale = min(max(1, w // virtual_w), max(1, h // virtual_h)) if virtual_w and virtual_h else 1
-                cached = self._bg_tile_scaled_cache.get(scale)
-                if cached is None:
-                    try:
-                        cached = pygame.transform.scale(tile, (tw * scale, th * scale))
-                    except Exception:
-                        cached = tile
-                    self._bg_tile_scaled_cache[scale] = cached
-                ttw, tth = cached.get_size()
-                dx = (w - virtual_w * scale) // 2
-                dy = (h - virtual_h * scale) // 2
-                off_x = dx % ttw
-                off_y = dy % tth
-                start_x = off_x
-                start_y = off_y
-                if start_x > 0:
-                    start_x -= ttw
-                if start_y > 0:
-                    start_y -= tth
-                for yy in range(start_y, h, tth):
-                    for xx in range(start_x, w, ttw):
-                        self.screen.blit(cached, (xx, yy))
+                # integer division to pick integer scale (may be 0)
+                scale = min(w // virtual_w, h // virtual_h) if virtual_w and virtual_h else 0
+                if scale >= 1:
+                    cached = self._bg_tile_scaled_cache.get(scale)
+                    if cached is None:
+                        try:
+                            cached = pygame.transform.scale(tile, (tw * scale, th * scale))
+                        except Exception:
+                            cached = tile
+                        self._bg_tile_scaled_cache[scale] = cached
+                    ttw, tth = cached.get_size()
+                    dx = (w - virtual_w * scale) // 2
+                    dy = (h - virtual_h * scale) // 2
+                    off_x = dx % ttw
+                    off_y = dy % tth
+                    start_x = off_x
+                    start_y = off_y
+                    if start_x > 0:
+                        start_x -= ttw
+                    if start_y > 0:
+                        start_y -= tth
+                    for yy in range(start_y, h, tth):
+                        for xx in range(start_x, w, ttw):
+                            self.screen.blit(cached, (xx, yy))
+                else:
+                    for yy in range(0, h, th):
+                        for xx in range(0, w, tw):
+                            self.screen.blit(tile, (xx, yy))
             else:
                 self.screen.fill((10, 10, 10))
 
@@ -388,35 +435,55 @@ class Menu:
             cw, ch = (120, 180)
             virtual_w = 16 + (cw + 16) * 4 + 16 + cw + 16
             virtual_h = max(640, 150 + ch + 200)
-            scale = min(max(1, w // virtual_w), max(1, h // virtual_h)) if virtual_w and virtual_h else 1
+            # integer division to pick integer scale (may be 0)
+            scale = min(w // virtual_w, h // virtual_h) if virtual_w and virtual_h else 0
+            if scale >= 1:
+                # center offset for a scaled game-area like GameEngine would compute
+                scaled_game_w = virtual_w * scale
+                scaled_game_h = virtual_h * scale
+                dx = (w - scaled_game_w) // 2
+                dy = (h - scaled_game_h) // 2
 
-            # center offset for a scaled game-area like GameEngine would compute
-            scaled_game_w = virtual_w * scale
-            scaled_game_h = virtual_h * scale
-            dx = (w - scaled_game_w) // 2
-            dy = (h - scaled_game_h) // 2
+                # use cached scaled tile for this integer scale
+                cached = self._bg_tile_scaled_cache.get(scale)
+                if cached is None:
+                    try:
+                        cached = pygame.transform.scale(tile, (tw * scale, th * scale))
+                    except Exception:
+                        cached = tile
+                    # Convert cached scaled tile to display format to speed blits.
+                    try:
+                        if cached is not None:
+                            if cached.get_flags() & pygame.SRCALPHA:
+                                try:
+                                    cached = cached.convert_alpha()
+                                except Exception:
+                                    pass
+                            else:
+                                try:
+                                    cached = cached.convert()
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    self._bg_tile_scaled_cache[scale] = cached
 
-            # use cached scaled tile for this integer scale
-            cached = self._bg_tile_scaled_cache.get(scale)
-            if cached is None:
-                try:
-                    cached = pygame.transform.scale(tile, (tw * scale, th * scale))
-                except Exception:
-                    cached = tile
-                self._bg_tile_scaled_cache[scale] = cached
-
-            ttw, tth = cached.get_size()
-            off_x = dx % ttw
-            off_y = dy % tth
-            start_x = off_x
-            start_y = off_y
-            if start_x > 0:
-                start_x -= ttw
-            if start_y > 0:
-                start_y -= tth
-            for yy in range(start_y, h, tth):
-                for xx in range(start_x, w, ttw):
-                    self.screen.blit(cached, (xx, yy))
+                ttw, tth = cached.get_size()
+                off_x = dx % ttw
+                off_y = dy % tth
+                start_x = off_x
+                start_y = off_y
+                if start_x > 0:
+                    start_x -= ttw
+                if start_y > 0:
+                    start_y -= tth
+                for yy in range(start_y, h, tth):
+                    for xx in range(start_x, w, ttw):
+                        self.screen.blit(cached, (xx, yy))
+            else:
+                for yy in range(0, h, th):
+                    for xx in range(0, w, tw):
+                        self.screen.blit(tile, (xx, yy))
         else:
             self.screen.fill((18, 18, 18))
         # Title
@@ -446,23 +513,80 @@ class Menu:
         Adjusts pygame.mixer.music volume for BGM and uses audio_settings
         to propagate changes to runtime sfx playback.
         """
-        # lazy import of audio settings (best-effort)
+        # lazy import of audio settings (best-effort) using dynamic import to avoid
+        # static unresolved relative import errors in different run contexts.
         try:
-            from .utils.audio_settings import get_master, get_bgm, get_sfx, set_master, set_bgm, set_sfx
+            import importlib
         except Exception:
-            # provide local fallbacks that do nothing
-            def get_master():
+            importlib = None
+
+        get_master_fn: Optional[Callable[[], float]] = None
+        get_bgm_fn: Optional[Callable[[], float]] = None
+        get_sfx_fn: Optional[Callable[[], float]] = None
+
+        set_master_fn: Optional[Callable[[float], None]] = None
+        set_bgm_fn: Optional[Callable[[float], None]] = None
+        set_sfx_fn: Optional[Callable[[float], None]] = None
+
+        if importlib is not None:
+            _mod = None
+            try:
+                if __package__:
+                    _mod = importlib.import_module(".utils.audio_settings", package=__package__)
+            except Exception:
+                _mod = None
+
+            if _mod is None:
+                try:
+                    _mod = importlib.import_module("utils.audio_settings")
+                except Exception:
+                    _mod = None
+
+            if _mod is not None:
+                try:
+                    get_master_fn = cast(Optional[Callable[[], float]], getattr(_mod, "get_master", None))
+                    get_bgm_fn = cast(Optional[Callable[[], float]], getattr(_mod, "get_bgm", None))
+                    get_sfx_fn = cast(Optional[Callable[[], float]], getattr(_mod, "get_sfx", None))
+                    set_master_fn = cast(Optional[Callable[[float], None]], getattr(_mod, "set_master", None))
+                    set_bgm_fn = cast(Optional[Callable[[float], None]], getattr(_mod, "set_bgm", None))
+                    set_sfx_fn = cast(Optional[Callable[[float], None]], getattr(_mod, "set_sfx", None))
+                except Exception:
+                    get_master_fn = get_bgm_fn = get_sfx_fn = None
+                    set_master_fn = set_bgm_fn = set_sfx_fn = None
+
+        # last-resort attempt using builtin __import__ (no static import statement)
+        if get_master_fn is None:
+            try:
+                mod = __import__("utils.audio_settings", fromlist=["get_master", "get_bgm", "get_sfx", "set_master", "set_bgm", "set_sfx"])
+                get_master_fn = cast(Optional[Callable[[], float]], getattr(mod, "get_master", None))
+                get_bgm_fn = cast(Optional[Callable[[], float]], getattr(mod, "get_bgm", None))
+                get_sfx_fn = cast(Optional[Callable[[], float]], getattr(mod, "get_sfx", None))
+                set_master_fn = cast(Optional[Callable[[float], None]], getattr(mod, "set_master", None))
+                set_bgm_fn = cast(Optional[Callable[[float], None]], getattr(mod, "set_bgm", None))
+                set_sfx_fn = cast(Optional[Callable[[float], None]], getattr(mod, "set_sfx", None))
+            except Exception:
+                pass
+
+        # provide local fallbacks that do nothing if import failed
+        if get_master_fn is None or get_bgm_fn is None or get_sfx_fn is None or set_master_fn is None or set_bgm_fn is None or set_sfx_fn is None:
+            def _fm():
                 return 1.0
-            def get_bgm():
+            def _fb():
                 return 0.5
-            def get_sfx():
+            def _fs():
                 return 0.9
-            def set_master(v):
+            def _sm(v):
                 pass
-            def set_bgm(v):
+            def _sb(v):
                 pass
-            def set_sfx(v):
+            def _ss(v):
                 pass
+            get_master_fn = _fm
+            get_bgm_fn = _fb
+            get_sfx_fn = _fs
+            set_master_fn = _sm
+            set_bgm_fn = _sb
+            set_sfx_fn = _ss
 
         # slider geometry in screen coords
         w, h = self.screen.get_size()
@@ -491,32 +615,41 @@ class Menu:
         while running:
             dt = clock.tick(60) / 1000.0
             t = pygame.time.get_ticks() / 1000.0
+
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT:
+                    # propagate quit by raising SystemExit to let caller handle
                     raise SystemExit()
                 if ev.type == pygame.KEYDOWN:
-                    # any key exits settings
+                    # Any key returns to the menu/settings exit
                     running = False
+                    break
                 if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                     mx, my = getattr(ev, 'pos', pygame.mouse.get_pos())
+                    clicked_slider = False
                     for i, name in enumerate(("master", "bgm", "sfx")):
                         sx, sy, sw, sh = slider_rect(i)
                         r = pygame.Rect(sx, sy - 6, sw, sh + 12)
                         if r.collidepoint(mx, my):
                             dragging = name
+                            clicked_slider = True
                             # update immediately on press
                             rel = (mx - sx) / sw if sw > 0 else 0.0
                             val = max(0.0, min(1.0, rel))
                             try:
                                 if name == "master":
-                                    set_master(val)
+                                    set_master_fn(val)
                                 elif name == "bgm":
-                                    set_bgm(val)
+                                    set_bgm_fn(val)
                                 else:
-                                    set_sfx(val)
+                                    set_sfx_fn(val)
                             except Exception:
                                 pass
                             break
+                    # if click was not on a slider, return from settings
+                    if not clicked_slider:
+                        running = False
+                        break
                 if ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
                     dragging = None
                 if ev.type == pygame.MOUSEMOTION and dragging is not None:
@@ -527,23 +660,50 @@ class Menu:
                     val = max(0.0, min(1.0, rel))
                     try:
                         if dragging == "master":
-                            set_master(val)
+                            set_master_fn(val)
                         elif dragging == "bgm":
-                            set_bgm(val)
+                            set_bgm_fn(val)
                         else:
-                            set_sfx(val)
+                            set_sfx_fn(val)
                     except Exception:
                         pass
 
             # draw background box
-            # tile/canvas background like menu
+            # tile/canvas background like menu (use integer-scale tiling to match GameEngine)
             tile = getattr(self, "_bg_tile", None)
             if tile is not None:
                 tw, th = tile.get_size()
-                # simple blit fill
-                for yy in range(0, h, th):
-                    for xx in range(0, w, tw):
-                        self.screen.blit(tile, (xx, yy))
+                cw, ch = (120, 180)
+                virtual_w = 16 + (cw + 16) * 4 + 16 + cw + 16
+                virtual_h = max(640, 150 + ch + 200)
+                # integer division to pick integer scale (may be 0)
+                scale = min(w // virtual_w, h // virtual_h) if virtual_w and virtual_h else 0
+                if scale >= 1:
+                    cached = self._bg_tile_scaled_cache.get(scale)
+                    if cached is None:
+                        try:
+                            cached = pygame.transform.scale(tile, (tw * scale, th * scale))
+                        except Exception:
+                            cached = tile
+                        self._bg_tile_scaled_cache[scale] = cached
+                    ttw, tth = cached.get_size()
+                    dx = (w - virtual_w * scale) // 2
+                    dy = (h - virtual_h * scale) // 2
+                    off_x = dx % ttw
+                    off_y = dy % tth
+                    start_x = off_x
+                    start_y = off_y
+                    if start_x > 0:
+                        start_x -= ttw
+                    if start_y > 0:
+                        start_y -= tth
+                    for yy in range(start_y, h, tth):
+                        for xx in range(start_x, w, ttw):
+                            self.screen.blit(cached, (xx, yy))
+                else:
+                    for yy in range(0, h, th):
+                        for xx in range(0, w, tw):
+                            self.screen.blit(tile, (xx, yy))
             else:
                 self.screen.fill((16, 16, 20))
 
@@ -555,8 +715,8 @@ class Menu:
             pygame.draw.rect(self.screen, (24, 24, 24), (bx, by, box_w, box_h))
             pygame.draw.rect(self.screen, (140, 140, 140), (bx, by, box_w, box_h), 2)
 
-            # slider labels and values
-            labels = [("Master", get_master()), ("BGM", get_bgm()), ("SFX", get_sfx())]
+            # slider labels and values using the fetched getter functions
+            labels = [("Master", get_master_fn()), ("BGM", get_bgm_fn()), ("SFX", get_sfx_fn())]
             for i, (lbl, val) in enumerate(labels):
                 sx, sy, sw, sh = slider_rect(i)
                 # label
@@ -592,16 +752,34 @@ class Menu:
 
 
 class MenuAtlasButton:
-    def __init__(self, rect, text, enabled, action, NPClass, atlas_tile, inset):
+    def __init__(self, rect, text, enabled, action, NPClass, atlas_tile, inset, font=None):
         self.rect = pygame.Rect(rect)
         self.text = text
         self.enabled = enabled
         self.action = action
+        # pre-render label surfaces for fallback drawing
+        self._label_enabled = None
+        self._label_disabled = None
+        try:
+            if font is not None:
+                try:
+                    self._label_enabled = font.render(self.text, False, (240, 240, 240))
+                except Exception:
+                    self._label_enabled = None
+                try:
+                    self._label_disabled = font.render(self.text, False, (160, 160, 160))
+                except Exception:
+                    self._label_disabled = None
+        except Exception:
+            self._label_enabled = None
+            self._label_disabled = None
         # create NinePatchButton instance; NPClass expects (tile, inset, pos, size, font, text)
         try:
             pos = (self.rect.left, self.rect.top)
             size = (self.rect.width, self.rect.height)
-            self._np = NPClass(atlas_tile, inset, pos, size, font=None, text=text)
+            # pass the font into the NinePatchButton if available so it can
+            # draw text itself when rendering via atlas-backed widget
+            self._np = NPClass(atlas_tile, inset, pos, size, font=font, text=text)
         except Exception:
             self._np = None
         self.hover = False
@@ -617,8 +795,25 @@ class MenuAtlasButton:
                 pygame.draw.rect(surf, (80, 80, 80), self.rect, border_radius=8)
         else:
             pygame.draw.rect(surf, (80, 80, 80), self.rect, border_radius=8)
-            txt = font.render(self.text, False, (240, 240, 240))
-            surf.blit(txt, txt.get_rect(center=self.rect.center))
+            # use cached label surfaces when available
+            try:
+                if self.enabled and self._label_enabled is not None:
+                    lbl = self._label_enabled
+                elif (not self.enabled) and self._label_disabled is not None:
+                    lbl = self._label_disabled
+                else:
+                    lbl = None
+                if lbl is not None:
+                    surf.blit(lbl, lbl.get_rect(center=self.rect.center))
+                else:
+                    txt = font.render(self.text, False, (240, 240, 240))
+                    surf.blit(txt, txt.get_rect(center=self.rect.center))
+            except Exception:
+                try:
+                    txt = font.render(self.text, False, (240, 240, 240))
+                    surf.blit(txt, txt.get_rect(center=self.rect.center))
+                except Exception:
+                    pass
 
     def update_hover(self, mouse_pos):
         self.hover = self.rect.collidepoint(mouse_pos)

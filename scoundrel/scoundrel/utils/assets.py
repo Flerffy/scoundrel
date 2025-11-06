@@ -100,10 +100,23 @@ class CardArtManager:
                     suit = DEFAULT_SUITS[s_idx] if s_idx < len(DEFAULT_SUITS) else DEFAULT_SUITS[s_idx % len(DEFAULT_SUITS)]
                     x = left_margin + r_idx * x_step
                     y = top_margin + s_idx * y_step
-                    surf = pygame.Surface((cw, ch), pygame.SRCALPHA)
-                    surf.blit(self.sheet, (0, 0), pygame.Rect(x, y, cw, ch))
-                    key = (suit, rank)
-                    self.card_surfaces[key] = surf
+                    # Extract the subsurface directly from the loaded sheet and
+                    # convert it to the display's pixel format with alpha so
+                    # subsequent blits are fast. Use copy() to get an independent Surface.
+                    try:
+                        subs = self.sheet.subsurface(pygame.Rect(x, y, cw, ch)).copy()
+                        try:
+                            subs = subs.convert_alpha()
+                        except Exception:
+                            # If convert_alpha fails (rare), fall back to the copy
+                            pass
+                        key = (suit, rank)
+                        self.card_surfaces[key] = subs
+                    except Exception:
+                        # Fallback to the previous approach if subsurface fails
+                        surf = pygame.Surface((cw, ch), pygame.SRCALPHA)
+                        surf.blit(self.sheet, (0, 0), pygame.Rect(x, y, cw, ch))
+                        self.card_surfaces[(suit, rank)] = surf
         except Exception:
             # failure to load sheet; keep sheet None to signal fallback
             self.sheet = None
@@ -130,6 +143,10 @@ class CardArtManager:
             try:
                 # Use nearest-neighbor scaling to preserve pixel art / sharp edges.
                 scaled = pygame.transform.scale(surf, size)
+                try:
+                    scaled = scaled.convert_alpha()
+                except Exception:
+                    pass
                 return scaled
             except Exception:
                 return surf

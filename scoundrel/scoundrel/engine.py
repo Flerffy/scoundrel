@@ -15,115 +15,121 @@ try:
     UIAtlas = _UIAtlas
 except Exception:
     UIAtlas = None
-try:
-    # Perform a runtime dynamic import to avoid static analyzers failing on
-    # relative imports when the optional UI package isn't present.
-    import importlib
+    try:
+        # Perform a runtime dynamic import to avoid static analyzers failing on
+        # relative imports when the optional UI package isn't present.
+        import importlib
 
-    _mod = None
-    if __package__:
-        try:
-            # Try a relative import using the current package context
-            _mod = importlib.import_module(".ui.widgets", package=__package__)
-        except Exception:
-            # Fallback: try importing using the package root as an absolute path
+        _mod = None
+        if __package__:
             try:
-                root = __package__.split(".")[0]
-                _mod = importlib.import_module(f"{root}.ui.widgets")
+                # Try a relative import using the current package context
+                _mod = importlib.import_module(".ui.widgets", package=__package__)
+            except Exception:
+                # Fallback: try importing using the package root as an absolute path
+                try:
+                    root = __package__.split(".")[0]
+                    _mod = importlib.import_module(f"{root}.ui.widgets")
+                except Exception:
+                    _mod = None
+        else:
+            # No package context; try importing a top-level module name if available
+            try:
+                _mod = importlib.import_module("ui.widgets")
             except Exception:
                 _mod = None
-    else:
-        # No package context; try importing a top-level module name if available
-        try:
-            _mod = importlib.import_module("ui.widgets")
-        except Exception:
-            _mod = None
 
-    if _mod is not None:
-        _NinePatchButton = getattr(_mod, "NinePatchButton", None)
-        NinePatchButton = _NinePatchButton
-    else:
-        NinePatchButton = None
-except Exception:
-    NinePatchButton = None
-
-
-DATA_DIR = Path(__file__).resolve().parents[2] / "data"
-from .utils.assets import CardArtManager
-# Best-effort runtime import for optional audio settings to avoid static analyzer
-# failures for relative imports; fall back to no-op helpers when unavailable.
-try:
-    import importlib
-
-    _audio_mod = None
-    if __package__:
-        try:
-            # try relative import using package context
-            _audio_mod = importlib.import_module(".utils.audio_settings", package=__package__)
-        except Exception:
-            try:
-                # fallback to importing from the package root
-                root = __package__.split(".")[0]
-                _audio_mod = importlib.import_module(f"{root}.utils.audio_settings")
-            except Exception:
-                _audio_mod = None
-    else:
-        # no package context; try top-level module
-        try:
-            _audio_mod = importlib.import_module("utils.audio_settings")
-        except Exception:
-            _audio_mod = None
-
-    if _audio_mod is not None:
-        get_master = getattr(_audio_mod, "get_master", lambda: 1.0)
-        get_sfx = getattr(_audio_mod, "get_sfx", lambda: 1.0)
-
-        # Retrieve the optional implementation if present, but wrap it to ensure
-        # a canonical signature that returns None so static checkers/types agree.
-        _apply_impl = getattr(_audio_mod, "apply_sfx_to_channel", None)
-        if callable(_apply_impl):
-            def apply_sfx_to_channel(channel, base_volume=1.0):
-                try:
-                    # Call the implementation and deliberately ignore its return value.
-                    _apply_impl(channel, base_volume)
-                except Exception:
-                    # Fallback behavior: if the channel exposes set_volume, call it.
-                    try:
-                        if channel is not None and hasattr(channel, "set_volume"):
-                            channel.set_volume(base_volume)
-                    except Exception:
-                        pass
+        if _mod is not None:
+            _NinePatchButton = getattr(_mod, "NinePatchButton", None)
+            NinePatchButton = _NinePatchButton
         else:
-            def apply_sfx_to_channel(channel, base_volume=1.0):
-                try:
-                    if channel is not None and hasattr(channel, "set_volume"):
-                        channel.set_volume(base_volume)
-                except Exception:
-                    pass
+            NinePatchButton = None
+    except Exception:
+        NinePatchButton = None
 
-        apply_music_volume = getattr(_audio_mod, "apply_music_volume", lambda: None)
-    else:
-        raise ImportError("optional audio_settings module not available")
-except Exception:
-    # best-effort fallback: define no-op functions
-    def get_master():
-        return 1.0
-    def get_sfx():
-        return 1.0
-    def apply_sfx_to_channel(channel, base_volume=1.0):
-        try:
-            if channel is not None:
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+from .utils.assets import CardArtManager
+# Audio settings helpers: resolve the optional audio_settings module at
+# runtime rather than caching references at import time. This avoids the
+# duplicate-module problem where the same underlying file can be imported
+# under multiple names (package-relative vs top-level) and cause stale
+# cached getters that don't reflect updates made by the settings UI.
+def _resolve_audio_mod():
+    try:
+        import importlib
+        if __package__:
+            try:
+                return importlib.import_module(".utils.audio_settings", package=__package__)
+            except Exception:
                 try:
-                    channel.set_volume(base_volume)
+                    root = __package__.split(".")[0]
+                    return importlib.import_module(f"{root}.utils.audio_settings")
                 except Exception:
                     pass
-        except Exception:
-            pass
-    def apply_music_volume():
         try:
-            pass
+            return importlib.import_module("utils.audio_settings")
         except Exception:
-            pass
+            return None
+    except Exception:
+        return None
+
+
+def get_master():
+    try:
+        mod = _resolve_audio_mod()
+        if mod is not None and hasattr(mod, "get_master"):
+            try:
+                return float(mod.get_master())
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return 1.0
+
+
+def get_sfx():
+    try:
+        mod = _resolve_audio_mod()
+        if mod is not None and hasattr(mod, "get_sfx"):
+            try:
+                return float(mod.get_sfx())
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return 1.0
+
+
+def apply_sfx_to_channel(channel, base_volume=1.0):
+    try:
+        mod = _resolve_audio_mod()
+        if mod is not None and hasattr(mod, "apply_sfx_to_channel"):
+            try:
+                mod.apply_sfx_to_channel(channel, base_volume)
+                return
+            except Exception:
+                pass
+        # fallback: attempt to set channel volume directly
+        if channel is not None and hasattr(channel, "set_volume"):
+            try:
+                channel.set_volume(float(base_volume))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def apply_music_volume():
+    try:
+        mod = _resolve_audio_mod()
+        if mod is not None and hasattr(mod, "apply_music_volume"):
+            try:
+                mod.apply_music_volume()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 class GameEngine:
@@ -157,17 +163,55 @@ class GameEngine:
         self.virtual_w = 16 + (cw + 16) * 4 + 16 + cw + 16
         # ensure enough height for instructions and padding; pick a sensible minimum
         self.virtual_h = max(640, 150 + ch + 200)
-        # try to load tiled background (optional)
+        # allocate a reusable virtual surface to avoid per-frame allocations
         try:
-            # assets/ is located at the package root (one level up from this module)
-            bg_path = Path(__file__).resolve().parents[1] / "assets" / "backgrounds" / "ClassicBackground.png"
-            if bg_path.exists():
-                # load as opaque surface (background tile should be opaque)
-                self._bg_tile = pygame.image.load(str(bg_path)).convert()
-            else:
-                self._bg_tile = None
+            # Create an RGB surface matching the virtual size and convert it to
+            # the display format to speed up blits. The provided `screen` is the
+            # real display surface so convert() should succeed.
+            self._virtual_surface = pygame.Surface((self.virtual_w, self.virtual_h))
+            try:
+                self._virtual_surface = self._virtual_surface.convert()
+            except Exception:
+                pass
         except Exception:
-            self._bg_tile = None
+            self._virtual_surface = None
+
+        # lightweight caches for dynamic UI elements to avoid re-rendering text
+        self._last_health = None
+        self._health_surf = None
+
+        # overlay cache keyed by (w,h,alpha) -> Surface for reuse
+        self._overlay_cache = {}
+        # cache for pre-rendered button label surfaces: (key, enabled) -> Surface
+        self._button_label_cache = {}
+        # try to load tiled background (optional)
+        # Try to use shared background tile/cache so gameplay and menu share
+        # the exact same tile and scaled-cache. Fall back to per-instance
+        # loading if the shared helper isn't available.
+        try:
+            from .utils.shared_bg import get_shared_bg_tile
+            try:
+                self._bg_tile, self._bg_tile_scaled_cache = get_shared_bg_tile()
+            except Exception:
+                self._bg_tile = None
+                self._bg_tile_scaled_cache = {}
+        except Exception:
+            try:
+                # assets/ is located at the package root (one level up from this module)
+                bg_path = Path(__file__).resolve().parents[1] / "assets" / "backgrounds" / "ClassicBackground.png"
+                if bg_path.exists():
+                    # Avoid calling convert() here to be robust across different
+                    # initialization orders; use the loaded Surface directly.
+                    self._bg_tile = pygame.image.load(str(bg_path))
+                else:
+                    self._bg_tile = None
+            except Exception:
+                self._bg_tile = None
+            # only initialize a fresh scaled-cache if one wasn't provided by the
+            # shared helper above; preserve any shared cache to ensure the
+            # same scaled tiles are reused across states.
+            if not hasattr(self, "_bg_tile_scaled_cache") or self._bg_tile_scaled_cache is None:
+                self._bg_tile_scaled_cache = {}
         # try to load a card-back image for the deck display
         try:
             back_path = Path(__file__).resolve().parents[1] / "assets" / "backsides" / "LightClassic.png"
@@ -183,7 +227,9 @@ class GameEngine:
         except Exception:
             self._backside = None
         # cache for background tiles scaled to integer multiples
-        self._bg_tile_scaled_cache = {}
+        # Only initialize if the shared helper didn't provide one.
+        if not hasattr(self, "_bg_tile_scaled_cache") or self._bg_tile_scaled_cache is None:
+            self._bg_tile_scaled_cache = {}
         # input mapping helpers
         self._last_scale = None
         self._last_offset = (0, 0)
@@ -211,6 +257,11 @@ class GameEngine:
                     self._card_flip_sound = pygame.mixer.Sound(str(sfx_path))
                     try:
                         self._card_flip_sound.set_volume(0.9)
+                        # record a baseline volume for reapplication when master changes
+                        try:
+                            setattr(self._card_flip_sound, "_base_volume", 0.9)
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                 except Exception:
@@ -231,6 +282,10 @@ class GameEngine:
                         s = pygame.mixer.Sound(str(p))
                         try:
                             s.set_volume(0.9)
+                            try:
+                                setattr(s, "_base_volume", 0.9)
+                            except Exception:
+                                pass
                         except Exception:
                             pass
                         return s
@@ -246,6 +301,16 @@ class GameEngine:
                 self._sfx["cardFlip"] = self._card_flip_sound
         except Exception:
             # best-effort; leave _sfx possibly empty
+            pass
+
+        # If the mixer has been initialized above, ensure any global music
+        # volume settings from the audio_settings helper are applied now.
+        try:
+            # apply_music_volume is a no-op if the optional audio module
+            # isn't present; call it regardless to ensure settings take
+            # effect after mixer initialization.
+            apply_music_volume()
+        except Exception:
             pass
 
         # try to locate a bundled UI font (DungeonFont.ttf) in assets/ui
@@ -321,6 +386,31 @@ class GameEngine:
         except Exception:
             return None, None
 
+    def _get_overlay_surface(self, w: int, h: int, alpha: int = 160):
+        """Return a cached semi-transparent overlay Surface for the given size.
+
+        Creates and caches an (w,h) SRCALPHA surface filled with black at the
+        provided alpha value so we don't allocate it each frame.
+        """
+        try:
+            key = (int(w), int(h), int(alpha))
+            s = self._overlay_cache.get(key)
+            if s is not None:
+                return s
+            surf = pygame.Surface((w, h), pygame.SRCALPHA)
+            try:
+                surf.fill((0, 0, 0, int(alpha)))
+            except Exception:
+                try:
+                    # fallback: fill with opaque black if alpha fill fails
+                    surf.fill((0, 0, 0))
+                except Exception:
+                    pass
+            self._overlay_cache[key] = surf
+            return surf
+        except Exception:
+            return None
+
     def _get_or_create_ninepatch_button(self, cache_key: str, semantic_tile: str, pos, size, text, font):
         """Return a cached NinePatchButton instance for given key, creating it if missing or out-of-date."""
         try:
@@ -373,6 +463,59 @@ class GameEngine:
         except Exception:
             return None
 
+    def _draw_menu_style_button(self, surf, rect: "pygame.Rect", label: str, font, enabled: bool = True, cache_key: Optional[str] = None):
+        """Draw a button matching the title/menu Button style used in `Menu`.
+
+        This reproduces the same base color, border, and text rendering so
+        buttons in the engine (pause, pending choices, back) match the main
+        menu appearance when the atlas-backed NinePatchButton is not available.
+        """
+        try:
+            base = (60, 60, 60) if enabled else (40, 40, 40)
+            hover_color = (100, 100, 100)
+            color = base
+            try:
+                pygame.draw.rect(surf, color, rect, border_radius=8)
+            except Exception:
+                try:
+                    pygame.draw.rect(surf, color, rect)
+                except Exception:
+                    pass
+            try:
+                pygame.draw.rect(surf, (200, 200, 200), rect, width=2, border_radius=8)
+            except Exception:
+                try:
+                    pygame.draw.rect(surf, (200, 200, 200), rect, width=2)
+                except Exception:
+                    pass
+            try:
+                label_surf = None
+                if cache_key:
+                    try:
+                        label_surf = self._button_label_cache.get((cache_key, bool(enabled)))
+                    except Exception:
+                        label_surf = None
+                if label_surf is None:
+                    try:
+                        color = (240, 240, 240) if enabled else (160, 160, 160)
+                        label_surf = font.render(label, False, color)
+                    except Exception:
+                        label_surf = None
+                    try:
+                        if cache_key and label_surf is not None:
+                            self._button_label_cache[(cache_key, bool(enabled))] = label_surf
+                    except Exception:
+                        pass
+                if label_surf is not None:
+                    try:
+                        surf.blit(label_surf, label_surf.get_rect(center=rect.center))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def get_font(self, size: int):
         """Return a cached pygame.font.Font at the requested size. Falls back to SysFont on error."""
         try:
@@ -417,7 +560,15 @@ class GameEngine:
                         else:
                             # if no channel returned, attempt to set Sound volume as fallback
                             try:
-                                snd.set_volume(get_sfx())
+                                try:
+                                    base = float(getattr(snd, "_base_volume", snd.get_volume()))
+                                except Exception:
+                                    try:
+                                        base = float(snd.get_volume())
+                                    except Exception:
+                                        base = 1.0
+                                vol = float(get_master()) * float(get_sfx()) * float(base)
+                                snd.set_volume(vol)
                             except Exception:
                                 pass
                     except Exception:
@@ -475,7 +626,13 @@ class GameEngine:
             except Exception:
                 anim["surf"] = None
 
-        anim.setdefault("frames_left", anim.get("total", 12))
+        # Use time-based durations (seconds) for animations. If callers
+        # specified an integer 'total' (frames), convert to seconds using
+        # the engine's nominal 60 FPS. Allow callers to override with
+        # an explicit 'duration' float (seconds).
+        anim.setdefault("duration", anim.get("duration", anim.get("total", 8) / 60.0))
+        # elapsed time into the animation in seconds
+        anim.setdefault("elapsed", 0.0)
 
         # Deduplicate conflicting animations for the same card. In particular,
         # prevent a 'to_weapon' and a 'discard' for the same card both being
@@ -509,7 +666,10 @@ class GameEngine:
                 at = anim.get("type")
                 ac = anim.get("card")
                 aid = id(ac) if ac is not None else None
-                print(f"[DEBUG] enqueue_animation type={at} card_id={aid} start={anim.get('start')} end={anim.get('end')} total={anim.get('total')}")
+                # show duration in frames for easier debugging
+                dur = anim.get("duration", 0.0)
+                frames = int(dur * 60)
+                print(f"[DEBUG] enqueue_animation type={at} card_id={aid} start={anim.get('start')} end={anim.get('end')} frames={frames}")
             except Exception:
                 pass
 
@@ -652,7 +812,7 @@ class GameEngine:
                 sp = (0, 0)
         end = self._get_discard_pos()
         try:
-            anim = {"type": "discard", "card": card, "start": sp, "end": end, "total": 14}
+            anim = {"type": "discard", "card": card, "start": sp, "end": end, "total": 10}
             self._enqueue_animation(anim)
         except Exception:
             if isinstance(card, Card):
@@ -695,6 +855,8 @@ class GameEngine:
         # but will not be rendered at its slot until its draw animation
         # completes.
         self._pending_draw_ids = set()
+        # current score accumulated from weapon discards and other events
+        self.score = 0
         # developer debug flag: set True to get lightweight console traces
         # for animation and potion-related events
         self._debug = False
@@ -747,6 +909,39 @@ class GameEngine:
             "last_monster": d.get("last_monster"),
         }
 
+    def _compute_weapon_points(self, w: Optional[Dict[str, Any]]):
+        """Compute points awarded when a weapon is discarded.
+
+        Rule: points = (weapon.value + sum(monster.value for each attached)) * number_of_attached_monsters
+        If no attached monsters, the weapon yields 0 points.
+        """
+        try:
+            if not w or not isinstance(w, dict):
+                return 0
+            card = w.get("card")
+            stack = w.get("stack", []) or []
+            if card is None or not isinstance(stack, list):
+                return 0
+            n = len(stack)
+            if n <= 0:
+                return 0
+            weapon_val = getattr(card, "value", 0)
+            try:
+                monsters_sum = sum(getattr(m, "value", 0) for m in stack)
+            except Exception:
+                monsters_sum = 0
+            total = weapon_val + monsters_sum
+            try:
+                pts = int(total * n)
+            except Exception:
+                try:
+                    pts = int(total) * int(n)
+                except Exception:
+                    pts = 0
+            return pts
+        except Exception:
+            return 0
+
     # -- game actions --
     def prepare_room(self):
         # fill room to 4 cards by enqueueing one-at-a-time draw animations
@@ -780,7 +975,7 @@ class GameEngine:
 
             # enqueue a draw animation (visual only) and mark card as pending so
             # it isn't rendered at its slot until the animation completes.
-            anim = {"type": "draw", "card": c, "start": deck_pos, "end": target_pos, "total": 12}
+            anim = {"type": "draw", "card": c, "start": deck_pos, "end": target_pos, "total": 8}
             try:
                 self._pending_draw_ids.add(id(c))
             except Exception:
@@ -906,6 +1101,21 @@ class GameEngine:
         # When equipping a new weapon, animate any previous weapon+stack to discard
         # first, then animate the new weapon moving into the weapon slot.
         if self.equipped_weapon:
+            # Compute and award points for the weapon being discarded
+            try:
+                pts = self._compute_weapon_points(self.equipped_weapon)
+                if pts:
+                    try:
+                        # Accumulate into engine score
+                        self.score = getattr(self, "score", 0) + pts
+                    except Exception:
+                        try:
+                            self.score += pts
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             prev_card = self.equipped_weapon.get("card")
             if prev_card is not None:
                 try:
@@ -915,7 +1125,6 @@ class GameEngine:
                     if isinstance(prev_card, Card):
                         self._move_to_discard(prev_card, start)
                     else:
-                        # fallback: only append if it actually looks like a Card
                         try:
                             if isinstance(prev_card, Card):
                                 self.discard.append(prev_card)
@@ -926,18 +1135,16 @@ class GameEngine:
                         self.discard.append(prev_card)
                     except Exception:
                         pass
-            # enqueue stacked monsters to discard as well
+            # enqueue stacked monsters to discard as visual cleanup (no extra points)
             if isinstance(self.equipped_weapon, dict):
                 stack = list(self.equipped_weapon.get("stack", []))
             else:
                 stack = []
             for m in stack:
                 try:
-                    # only move objects that look like Card instances
                     if isinstance(m, Card):
                         self._move_to_discard(m)
                     else:
-                        # non-Card fallback: only append if it's actually a Card
                         try:
                             if isinstance(m, Card):
                                 self.discard.append(m)
@@ -953,7 +1160,7 @@ class GameEngine:
         weapon_pos = layout.get("weapon_pos")
         sp = start_pos if start_pos is not None else getattr(self, "_last_weapon_pos", weapon_pos)
         try:
-            anim = {"type": "equip", "card": card, "start": sp, "end": weapon_pos, "total": 14}
+            anim = {"type": "equip", "card": card, "start": sp, "end": weapon_pos, "total": 10}
             self._enqueue_animation(anim)
         except Exception:
             # fallback: set immediately
@@ -991,7 +1198,7 @@ class GameEngine:
                     if sp is None:
                         sp = getattr(self, "_last_weapon_pos", weapon_pos)
                     try:
-                        anim = {"type": "to_weapon", "card": card, "start": sp, "end": weapon_pos, "total": 12}
+                        anim = {"type": "to_weapon", "card": card, "start": sp, "end": weapon_pos, "total": 8}
                         self._enqueue_animation(anim)
                     except Exception:
                         # fallback: append immediately (guard type)
@@ -1027,6 +1234,16 @@ class GameEngine:
                 self._play_sfx("monsterHit")
             except Exception:
                 pass
+            # Award points for a barehand kill: each monster's value is worth points
+            mv = 0
+            try:
+                mv = int(monster_value) if monster_value is not None else 0
+                self.score = getattr(self, "score", 0) + mv
+            except Exception:
+                try:
+                    self.score += mv
+                except Exception:
+                    pass
             return {"action": "barehand", "damage": monster_value}
 
         # prefer_weapon is None: auto behavior
@@ -1057,7 +1274,7 @@ class GameEngine:
                 if sp is None:
                     sp = getattr(self, "_last_weapon_pos", weapon_pos)
                 try:
-                    anim = {"type": "to_weapon", "card": card, "start": sp, "end": weapon_pos, "total": 12}
+                    anim = {"type": "to_weapon", "card": card, "start": sp, "end": weapon_pos, "total": 8}
                     self._enqueue_animation(anim)
                 except Exception:
                     try:
@@ -1108,32 +1325,61 @@ class GameEngine:
                         self.discard.append(card)
                 except Exception:
                     pass
+        # Award points for a barehand kill (auto fallback when weapon not used)
+        mv = 0
+        try:
+            mv = int(monster_value) if monster_value is not None else 0
+            self.score = getattr(self, "score", 0) + mv
+        except Exception:
+            try:
+                self.score += mv
+            except Exception:
+                pass
         return {"action": "barehand", "damage": monster_value}
 
     def is_game_over(self):
         return self.health <= 0 or (len(self.deck) == 0 and len(self.room) == 0)
 
     def compute_score(self):
+        # Primary score is accumulated into self.score when weapons are discarded
+        base = getattr(self, "score", 0)
+        # If the player died, also award points from the currently-equipped
+        # weapon as if it were discarded now.
         if self.health <= 0:
-            # find remaining monsters in dungeon (deck + room)
-            total = 0
-            for c in self.deck.cards:
-                if c.suit in ("clubs", "spades"):
-                    total += c.value
-            for c in self.room:
-                if c.suit in ("clubs", "spades"):
-                    total += c.value
-            return self.health - total
-        else:
-            # finished dungeon
-            if self.health == self.starting_health and self.last_potion_value:
-                return self.health + self.last_potion_value
-            return self.health
+            try:
+                extra = self._compute_weapon_points(self.equipped_weapon)
+            except Exception:
+                extra = 0
+            return base + (extra or 0)
+        # Otherwise return accumulated score. Health-based bonuses are not
+        # part of the new scoring model (points come from monster kills/weapon
+        # discards), so return the accumulated total.
+        return base
 
     # -- rendering / simple UI helpers --
     def render(self):
         # We'll draw everything into a virtual surface and scale that to the real display.
-        surf = pygame.Surface((self.virtual_w, self.virtual_h))
+        # Reuse a pre-allocated virtual surface when available to avoid per-frame allocations.
+        _vs = getattr(self, "_virtual_surface", None)
+        # local pre-declarations to help static analyzers and ensure
+        # fallback branches don't accidentally reference uninitialized
+        # locals. These will be assigned properly below.
+        surf = None
+        _hs = None
+        score_surf = None
+        if _vs is None:
+            surf = pygame.Surface((self.virtual_w, self.virtual_h))
+        else:
+            # narrow local var so static analyzers understand type in this branch
+            vs = _vs
+            surf = vs
+            try:
+                surf.fill((0, 0, 0))
+            except Exception:
+                try:
+                    surf.fill((24, 24, 24))
+                except Exception:
+                    pass
         # tile background if available, otherwise fill with solid color
         tile = getattr(self, "_bg_tile", None)
         if tile is not None:
@@ -1143,11 +1389,101 @@ class GameEngine:
                     surf.blit(tile, (xx, yy))
         else:
             surf.fill((24, 24, 24))
-        # Health
+        # Health (cache rendering to avoid repeated font rasterization)
         font = self.get_font(28)
         big = self.get_font(40)
-        h_surf = big.render(f"Health: {self.health}", False, (220, 220, 220))
-        surf.blit(h_surf, (16, 16))
+        # Cache health text rendering and only blit when available
+        try:
+            if getattr(self, "_last_health", None) != self.health or getattr(self, "_health_surf", None) is None:
+                try:
+                    self._health_surf = big.render(f"Health: {self.health}", False, (220, 220, 220))
+                except Exception:
+                    self._health_surf = None
+                self._last_health = self.health
+        except Exception:
+            self._health_surf = None
+            self._last_health = self.health
+        _hs = getattr(self, "_health_surf", None)
+        # Score display (directly under Health) and framed background
+        try:
+            score_val = int(getattr(self, "score", 0))
+        except Exception:
+            score_val = 0
+        score_font = self.get_font(24)
+        try:
+            score_surf = score_font.render(f"Score: {score_val}", False, (220, 220, 220))
+        except Exception:
+            score_surf = None
+
+        # Ensure health surface exists (fallback if rendering failed earlier)
+        if _hs is None:
+            try:
+                _hs = big.render(f"Health: {self.health}", False, (220, 220, 220))
+            except Exception:
+                _hs = None
+
+        # Predeclare layout measurement variables so static analyzers and
+        # fallback branches can't complain about possibly-unbound locals.
+        h_w = h_h = s_w = s_h = 0
+
+        try:
+            # Layout: content starts at (16,16). Draw a framed box behind the
+            # two lines (health + score) to match the weapon badge style.
+            content_x = 16
+            content_y = 16
+            gap = 8
+            pad_x = 8
+            pad_y = 8
+            h_w = _hs.get_width() if _hs is not None else 0
+            h_h = _hs.get_height() if _hs is not None else 0
+            s_w = score_surf.get_width() if score_surf is not None else 0
+            s_h = score_surf.get_height() if score_surf is not None else 0
+            box_w = max(h_w, s_w) + pad_x * 2
+            box_h = h_h + gap + s_h + pad_y * 2
+            box_x = content_x - pad_x
+            box_y = content_y - pad_y
+            # draw background and border (use same colors as weapon badge)
+            try:
+                pygame.draw.rect(surf, (60, 60, 60), (box_x, box_y, box_w, box_h), border_radius=8)
+            except Exception:
+                try:
+                    pygame.draw.rect(surf, (60, 60, 60), (box_x, box_y, box_w, box_h))
+                except Exception:
+                    pass
+            try:
+                pygame.draw.rect(surf, (180, 180, 180), (box_x, box_y, box_w, box_h), width=2, border_radius=8)
+            except Exception:
+                try:
+                    pygame.draw.rect(surf, (180, 180, 180), (box_x, box_y, box_w, box_h), width=2)
+                except Exception:
+                    pass
+            # blit health and score onto the framed box
+            try:
+                if _hs is not None:
+                    surf.blit(_hs, (content_x, content_y))
+            except Exception:
+                pass
+            try:
+                if score_surf is not None:
+                    surf.blit(score_surf, (content_x, content_y + h_h + gap))
+            except Exception:
+                pass
+        except Exception:
+            # fallback: draw health and score without framed box
+            try:
+                if _hs is not None:
+                    surf.blit(_hs, (16, 16))
+            except Exception:
+                pass
+            try:
+                if score_surf is not None:
+                    try:
+                        y_off = 16 + ((h_h) if ("h_h" in locals() and h_h) else 40) + 8
+                    except Exception:
+                        y_off = 16 + 48
+                    surf.blit(score_surf, (16, y_off))
+            except Exception:
+                pass
         # (Removed: top-left dungeon/discard counts and weapon text per UI change)
 
         # Room display (render card art when available)
@@ -1218,10 +1554,15 @@ class GameEngine:
             skip_rect = btn.rect
             self.ui_buttons["skip_room"] = (skip_rect, skip_enabled)
         else:
-            color = (40, 120, 40) if skip_enabled else (70, 70, 70)
-            pygame.draw.rect(surf, color, skip_rect)
-            lbl = font.render("Skip Room", False, (255, 255, 255))
-            surf.blit(lbl, (bx + 12, by + (bh - lbl.get_height()) // 2))
+            # draw using the unified menu-style button so appearance matches
+            # the main menu when an atlas-backed button isn't available.
+            try:
+                self._draw_menu_style_button(surf, skip_rect, "Skip Room", font, enabled=skip_enabled, cache_key="skip_room")
+            except Exception:
+                try:
+                    pygame.draw.rect(surf, (70, 70, 70), skip_rect)
+                except Exception:
+                    pass
             self.ui_buttons["skip_room"] = (skip_rect, skip_enabled)
 
         # Draw equipped weapon art and stacked monsters
@@ -1258,6 +1599,46 @@ class GameEngine:
                     mtxt = font.render(f"{m.rank}", False, (240, 240, 240))
                     pygame.draw.rect(surf, (60, 60, 60), (sx, offy, small_w, small_h))
                     surf.blit(mtxt, (sx + 4, offy + 4))
+        # Weapon points badge: show how many points the equipped weapon would be worth
+        try:
+            if self.equipped_weapon:
+                pts = self._compute_weapon_points(self.equipped_weapon)
+                badge_font = self.get_font(20)
+                badge_text = str(int(pts))
+                b_surf = badge_font.render(badge_text, False, (255, 255, 255))
+                bw = max(48, b_surf.get_width() + 12)
+                bh = max(24, b_surf.get_height() + 8)
+                # prefer to place to the right of the weapon; if that would overflow
+                # the virtual surface, place to the left instead
+                bx = self.weapon_rect.right + 8
+                by = self.weapon_rect.top
+                try:
+                    vw, vh = surf.get_size()
+                    if bx + bw > vw - 8:
+                        # place to left of weapon
+                        bx = self.weapon_rect.left - bw - 8
+                except Exception:
+                    pass
+                try:
+                    pygame.draw.rect(surf, (60, 60, 60), (bx, by, bw, bh), border_radius=6)
+                except Exception:
+                    try:
+                        pygame.draw.rect(surf, (60, 60, 60), (bx, by, bw, bh))
+                    except Exception:
+                        pass
+                try:
+                    pygame.draw.rect(surf, (180, 180, 180), (bx, by, bw, bh), width=2, border_radius=6)
+                except Exception:
+                    try:
+                        pygame.draw.rect(surf, (180, 180, 180), (bx, by, bw, bh), width=2)
+                    except Exception:
+                        pass
+                try:
+                    surf.blit(b_surf, (bx + (bw - b_surf.get_width()) // 2, by + (bh - b_surf.get_height()) // 2))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Draw Deck (face-down) and Discard (last-interacted card)
         # Place the deck centered horizontally above the room cards
         deck_x = x_start + (total_width - card_w) // 2
@@ -1348,13 +1729,28 @@ class GameEngine:
         # draw active animation (queued animations are processed sequentially)
         anim = getattr(self, "_active_anim", None)
         if anim:
-            frames_left = anim.get("frames_left", anim.get("total", 1))
-            total = anim.get("total", 1)
-            t = 1.0 - (frames_left / total) if total else 1.0
+            # advance elapsed time using the per-frame dt set in run()
+            dt = getattr(self, "_dt", 1.0 / 60.0)
+            try:
+                anim["elapsed"] = float(anim.get("elapsed", 0.0)) + float(dt)
+            except Exception:
+                anim["elapsed"] = anim.get("elapsed", 0.0)
+
+            duration = float(anim.get("duration", 0.0))
+            if duration <= 0:
+                t = 1.0
+            else:
+                t = anim.get("elapsed", 0.0) / duration
+                if t > 1.0:
+                    t = 1.0
+
             sx, sy = anim.get("start", (0, 0))
             ex, ey = anim.get("end", (sx, sy))
             # simple ease-out interpolation
-            ease = 1 - (1 - t) * (1 - t)
+            try:
+                ease = 1 - (1 - t) * (1 - t)
+            except Exception:
+                ease = t
             ix = int(sx + (ex - sx) * ease)
             iy = int(sy + (ey - sy) * ease)
             try:
@@ -1368,35 +1764,40 @@ class GameEngine:
                 surf.blit(surf_to_draw, (ix, iy))
             except Exception:
                 pass
-            anim["frames_left"] = frames_left - 1
-            if anim["frames_left"] <= 0:
+
+            # If animation finished, finalize and advance to next
+            if t >= 1.0:
                 try:
                     self._on_animation_complete(anim)
                 except Exception:
                     # ensure we clear active anim on error
                     self._active_anim = None
 
-        # Draw pause overlay and controls if paused
+        # Draw pause overlay and controls if paused. Do not draw a full
+        # semi-transparent rectangle over the virtual surface here because
+        # that produces a large dark box centered on the display when the
+        # virtual surface is letterboxed. Keeping the tiled background
+        # visible provides a cleaner look; any dimming should be applied
+        # to the real display after scaling if desired.
         if getattr(self, "paused", False):
-            overlay = pygame.Surface((self.virtual_w, self.virtual_h), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 180))
-            surf.blit(overlay, (0, 0))
+            pass
             # central pause menu (draw framed window if atlas available)
             menu_w = 360
             menu_h = 260
             mx = (self.virtual_w - menu_w) // 2
             my = (self.virtual_h - menu_h) // 2
-            # Try to draw a window frame from atlas
+            # Draw an opaque menu box to match the main menu / settings style.
+            # This replaces the clipped semi-transparent dimmer with the same
+            # filled box + border used in `Menu._show_settings` so the pause
+            # dialog looks identical to other menus.
             try:
-                frame_btn = self._get_or_create_ninepatch_button("pause_frame", "window_frame", (mx - 8, my - 8), (menu_w + 16, menu_h + 16), "", font)
-                if frame_btn:
-                    frame_btn.draw(surf)
-                else:
-                    pygame.draw.rect(surf, (30, 30, 30), (mx, my, menu_w, menu_h))
-                    pygame.draw.rect(surf, (140, 140, 140), (mx, my, menu_w, menu_h), 2)
-            except Exception:
-                pygame.draw.rect(surf, (30, 30, 30), (mx, my, menu_w, menu_h))
+                pygame.draw.rect(surf, (28, 28, 28), (mx, my, menu_w, menu_h))
                 pygame.draw.rect(surf, (140, 140, 140), (mx, my, menu_w, menu_h), 2)
+            except Exception:
+                try:
+                    pygame.draw.rect(surf, (140, 140, 140), (mx, my, menu_w, menu_h), 2)
+                except Exception:
+                    pass
             title = big.render("Paused", False, (240, 240, 240))
             surf.blit(title, (mx + (menu_w - title.get_width()) // 2, my + 14))
 
@@ -1413,9 +1814,15 @@ class GameEngine:
                 resume_rect = resume_btn.rect
             else:
                 resume_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
-                pygame.draw.rect(surf, (50, 120, 50), resume_rect)
-                r_lbl = font.render("Resume", False, (255, 255, 255))
-                surf.blit(r_lbl, (resume_rect.left + (btn_w - r_lbl.get_width()) // 2, resume_rect.top + 10))
+                try:
+                    self._draw_menu_style_button(surf, resume_rect, "Resume", font, enabled=True, cache_key="pause_resume")
+                except Exception:
+                    try:
+                        pygame.draw.rect(surf, (50, 120, 50), resume_rect)
+                        r_lbl = font.render("Resume", False, (255, 255, 255))
+                        surf.blit(r_lbl, (resume_rect.left + (btn_w - r_lbl.get_width()) // 2, resume_rect.top + 10))
+                    except Exception:
+                        pass
 
             # Settings
             btn_y += btn_h + 12
@@ -1425,9 +1832,15 @@ class GameEngine:
                 settings_rect = settings_btn.rect
             else:
                 settings_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
-                pygame.draw.rect(surf, (70, 70, 120), settings_rect)
-                s_lbl = font.render("Settings", False, (255, 255, 255))
-                surf.blit(s_lbl, (settings_rect.left + (btn_w - s_lbl.get_width()) // 2, settings_rect.top + 10))
+                try:
+                    self._draw_menu_style_button(surf, settings_rect, "Settings", font, enabled=True, cache_key="pause_settings")
+                except Exception:
+                    try:
+                        pygame.draw.rect(surf, (70, 70, 120), settings_rect)
+                        s_lbl = font.render("Settings", False, (255, 255, 255))
+                        surf.blit(s_lbl, (settings_rect.left + (btn_w - s_lbl.get_width()) // 2, settings_rect.top + 10))
+                    except Exception:
+                        pass
 
             # Main Menu
             btn_y += btn_h + 12
@@ -1437,9 +1850,15 @@ class GameEngine:
                 main_rect = main_btn.rect
             else:
                 main_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
-                pygame.draw.rect(surf, (140, 40, 40), main_rect)
-                m_lbl = font.render("Main Menu", False, (255, 255, 255))
-                surf.blit(m_lbl, (main_rect.left + (btn_w - m_lbl.get_width()) // 2, main_rect.top + 10))
+                try:
+                    self._draw_menu_style_button(surf, main_rect, "Main Menu", font, enabled=True, cache_key="pause_mainmenu")
+                except Exception:
+                    try:
+                        pygame.draw.rect(surf, (140, 40, 40), main_rect)
+                        m_lbl = font.render("Main Menu", False, (255, 255, 255))
+                        surf.blit(m_lbl, (main_rect.left + (btn_w - m_lbl.get_width()) // 2, main_rect.top + 10))
+                    except Exception:
+                        pass
 
             # expose pause buttons for input handling
             self.ui_buttons["pause_resume"] = (resume_rect, True)
@@ -1447,10 +1866,10 @@ class GameEngine:
             self.ui_buttons["pause_mainmenu"] = (main_rect, True)
 
         # If in settings subpage (simple stub), draw page and back button
+        # Note: avoid drawing a full-screen translucent fill on the virtual
+        # surface to prevent an opaque-looking box over the tiled background.
         if getattr(self, "in_settings", False):
-            s_overlay = pygame.Surface((self.virtual_w, self.virtual_h), pygame.SRCALPHA)
-            s_overlay.fill((0, 0, 0, 200))
-            surf.blit(s_overlay, (0, 0))
+            pass
             sw = 520
             sh = 320
             sx = (self.virtual_w - sw) // 2
@@ -1461,9 +1880,15 @@ class GameEngine:
             surf.blit(t, (sx + (sw - t.get_width()) // 2, sy + 16))
             # Back button
             back_rect = pygame.Rect(sx + (sw - 200) // 2, sy + sh - 70, 200, 48)
-            pygame.draw.rect(surf, (90, 90, 90), back_rect)
-            btxt = font.render("Back", False, (255, 255, 255))
-            surf.blit(btxt, (back_rect.left + (200 - btxt.get_width()) // 2, back_rect.top + 10))
+            try:
+                self._draw_menu_style_button(surf, back_rect, "Back", font, enabled=True, cache_key="settings_back")
+            except Exception:
+                try:
+                    pygame.draw.rect(surf, (90, 90, 90), back_rect)
+                    btxt = font.render("Back", False, (255, 255, 255))
+                    surf.blit(btxt, (back_rect.left + (200 - btxt.get_width()) // 2, back_rect.top + 10))
+                except Exception:
+                    pass
             self.ui_buttons["settings_back"] = (back_rect, True)
 
         # If there's a pending combat choice, draw simple buttons
@@ -1496,13 +1921,25 @@ class GameEngine:
                 btn_bare.draw(surf)
                 bare_rect = btn_bare.rect
             else:
-                color = (40, 120, 40) if allowed_weapon else (70, 70, 70)
-                pygame.draw.rect(surf, color, use_rect)
-                u_txt = font.render("Use Weapon", False, (255, 255, 255))
-                surf.blit(u_txt, (bx + 18, by + 12))
-                pygame.draw.rect(surf, (120, 40, 40), bare_rect)
-                b_txt = font.render("Barehand", False, (255, 255, 255))
-                surf.blit(b_txt, (bx + bw + 34, by + 12))
+                try:
+                    self._draw_menu_style_button(surf, use_rect, "Use Weapon", font, enabled=allowed_weapon, cache_key="pending_use")
+                except Exception:
+                    try:
+                        color = (40, 120, 40) if allowed_weapon else (70, 70, 70)
+                        pygame.draw.rect(surf, color, use_rect)
+                        u_txt = font.render("Use Weapon", False, (255, 255, 255))
+                        surf.blit(u_txt, (bx + 18, by + 12))
+                    except Exception:
+                        pass
+                try:
+                    self._draw_menu_style_button(surf, bare_rect, "Barehand", font, enabled=True, cache_key="pending_bare")
+                except Exception:
+                    try:
+                        pygame.draw.rect(surf, (120, 40, 40), bare_rect)
+                        b_txt = font.render("Barehand", False, (255, 255, 255))
+                        surf.blit(b_txt, (bx + bw + 34, by + 12))
+                    except Exception:
+                        pass
 
             self.ui_buttons["use_weapon"] = (use_rect, allowed_weapon)
             self.ui_buttons["barehand"] = (bare_rect, True)
@@ -1528,6 +1965,21 @@ class GameEngine:
                         cached = pygame.transform.scale(tile, (tw * scale, th * scale))
                     except Exception:
                         cached = tile
+                    # Convert cached scaled tile to display format to speed blits.
+                    try:
+                        if cached is not None:
+                            if cached.get_flags() & pygame.SRCALPHA:
+                                try:
+                                    cached = cached.convert_alpha()
+                                except Exception:
+                                    pass
+                            else:
+                                try:
+                                    cached = cached.convert()
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
                     self._bg_tile_scaled_cache[scale] = cached
                 ttw, tth = cached.get_size()
                 # Align the display tiling with the scaled game area's origin (dx, dy).
@@ -1583,7 +2035,11 @@ class GameEngine:
                 except Exception:
                     pass
         while running:
-            self.clock.tick(30)
+            # Run at 60 FPS for smoother animations and input responsiveness
+            # Capture delta-time (seconds) for time-based animations.
+            dt = self.clock.tick(60) / 1000.0
+            # store for render() to consume
+            self._dt = dt
             for ev in pygame.event.get():
                 # Always allow window close
                 if ev.type == pygame.QUIT:
@@ -1706,7 +2162,42 @@ class GameEngine:
                                 if settings_info:
                                     srect, _ = settings_info
                                     if srect.collidepoint(vx, vy):
-                                        self.in_settings = True
+                                        # Try to reuse the main-menu settings UI so the
+                                        # pause menu exposes the identical settings dialog.
+                                        try:
+                                            import importlib
+                                        except Exception:
+                                            importlib = None
+
+                                        opened = False
+                                        if importlib is not None:
+                                            try:
+                                                mod = None
+                                                if __package__:
+                                                    try:
+                                                        mod = importlib.import_module(".ui", package=__package__)
+                                                    except Exception:
+                                                        mod = None
+                                                if mod is None:
+                                                    try:
+                                                        mod = importlib.import_module("scoundrel.ui")
+                                                    except Exception:
+                                                        mod = None
+                                                if mod is not None and hasattr(mod, "Menu"):
+                                                    try:
+                                                        Menu = getattr(mod, "Menu")
+                                                        m = Menu(self.display, title="Scoundrel")
+                                                        # Show the same settings screen as the main menu.
+                                                        m._show_settings()
+                                                        opened = True
+                                                    except Exception:
+                                                        opened = False
+                                            except Exception:
+                                                opened = False
+
+                                        if not opened:
+                                            # fallback to the simple in-settings overlay
+                                            self.in_settings = True
                                         continue
                                 if main_info:
                                     mrect, _ = main_info
@@ -1839,11 +2330,26 @@ class GameEngine:
                 disp_w, disp_h = self.display.get_size()
                 mx = disp_w // 2 - msg.get_width() // 2
                 my = disp_h // 2 - msg.get_height() // 2
-                # semi-transparent overlay
-                overlay = pygame.Surface((disp_w, disp_h), pygame.SRCALPHA)
-                overlay.fill((0, 0, 0, 160))
-                self.display.blit(overlay, (0, 0))
+                # semi-transparent overlay (use cached/reusable surface)
+                overlay = self._get_overlay_surface(disp_w, disp_h, 160)
+                if overlay is not None:
+                    try:
+                        self.display.blit(overlay, (0, 0))
+                    except Exception:
+                        pass
                 self.display.blit(msg, (mx, my))
                 pygame.display.flip()
                 pygame.time.wait(2500)
+                # Clear any pending input events (clicks, keypresses) so the
+                # subsequent menu doesn't immediately receive the click that
+                # closed the game-over screen.
+                try:
+                    # remove all events from the queue
+                    pygame.event.clear()
+                except Exception:
+                    try:
+                        # best-effort: pump the event queue
+                        pygame.event.pump()
+                    except Exception:
+                        pass
                 return "menu"

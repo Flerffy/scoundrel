@@ -29,6 +29,24 @@ def _ensure_data_dir():
         pass
 
 
+# Expose this module under common import names so different import paths
+# (package-relative vs top-level) resolve to the same module object. This
+# helps avoid the duplicate-module problem where callers import the same
+# file under different names and end up with separate module objects and
+# divergent runtime state.
+try:
+    import sys
+    cur = sys.modules.get(__name__)
+    if cur is not None:
+        for _n in ("scoundrel.utils.audio_settings", "utils.audio_settings"):
+            if _n not in sys.modules:
+                try:
+                    sys.modules[_n] = cur
+                except Exception:
+                    pass
+except Exception:
+    pass
+
 def _clamp(v: float) -> float:
     try:
         if v < 0.0:
@@ -44,6 +62,11 @@ def set_master(v: float) -> None:
     global _master_volume
     _master_volume = _clamp(v)
     apply_music_volume()
+    try:
+        # apply to any currently-playing sfx channels as well
+        apply_all_sfx_volumes()
+    except Exception:
+        pass
     # persist
     try:
         save_settings()
@@ -64,6 +87,11 @@ def set_bgm(v: float) -> None:
 def set_sfx(v: float) -> None:
     global _sfx_volume
     _sfx_volume = _clamp(v)
+    try:
+        # update currently-playing sfx channels
+        apply_all_sfx_volumes()
+    except Exception:
+        pass
     try:
         save_settings()
     except Exception:
@@ -151,5 +179,47 @@ def apply_sfx_to_channel(channel: "pygame.mixer.Channel", base_volume: float = 1
             channel.set_volume(vol)
         except Exception:
             pass
+    except Exception:
+        pass
+
+
+def apply_all_sfx_volumes() -> None:
+    """Apply master*sfx*base to all active mixer channels (best-effort).
+
+    This iterates mixer channels and adjusts volumes based on the Sound
+    object's recorded _base_volume attribute if present, otherwise falls
+    back to the Sound.get_volume() value as the baseline.
+    """
+    try:
+        if not pygame.mixer.get_init():
+            return
+        try:
+            nch = pygame.mixer.get_num_channels()
+        except Exception:
+            nch = 0
+        for i in range(nch):
+            try:
+                ch = pygame.mixer.Channel(i)
+                snd = None
+                try:
+                    snd = ch.get_sound()
+                except Exception:
+                    snd = None
+                if snd is None:
+                    continue
+                try:
+                    base = float(getattr(snd, "_base_volume", snd.get_volume()))
+                except Exception:
+                    try:
+                        base = float(snd.get_volume())
+                    except Exception:
+                        base = 1.0
+                vol = float(_master_volume) * float(_sfx_volume) * float(base)
+                try:
+                    ch.set_volume(vol)
+                except Exception:
+                    pass
+            except Exception:
+                pass
     except Exception:
         pass
