@@ -1,6 +1,7 @@
 import pygame
 import json
 import math
+import sys
 from pathlib import Path
 from typing import Optional, Callable, cast
 
@@ -61,9 +62,18 @@ TITLE_GAP = 36
 
 FONT_NAME = None  # None uses default pygame font; set to a path in assets if you want
 
-# Attempt to prefer bundled DungeonFont.ttf in assets/ui if present
+# Attempt to prefer bundled DungeonFont.ttf in assets/ui if present.
+# When PyInstaller builds a one-file EXE it extracts bundled data to a
+# temporary directory referenced by sys._MEIPASS. Prefer that location
+# when present so bundled fonts load correctly from the frozen app.
 try:
-    DEFAULT_FONT_PATH = Path(__file__).resolve().parents[1] / "assets" / "ui" / "DungeonFont.ttf"
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        # When datas are added as 'scoundrel/assets;scoundrel/assets' the
+        # extracted path will contain a top-level 'scoundrel' directory.
+        DEFAULT_FONT_PATH = Path(meipass) / "scoundrel" / "assets" / "ui" / "DungeonFont.ttf"
+    else:
+        DEFAULT_FONT_PATH = Path(__file__).resolve().parents[1] / "assets" / "ui" / "DungeonFont.ttf"
     if not DEFAULT_FONT_PATH.exists():
         DEFAULT_FONT_PATH = None
 except Exception:
@@ -197,6 +207,7 @@ class Menu:
         labels = [
             ("New Game", True, "new"),
             ("Custom Game (placeholder)", False, None),  # disabled
+            ("How to Play", True, "howto"),
             ("Settings", True, "settings"),
             ("Credits", True, "credits"),
             ("Quit", True, "quit"),
@@ -313,6 +324,12 @@ class Menu:
                                     # swallow errors from credits display and continue
                                     pass
                                 break
+                            if btn.action == "howto":
+                                try:
+                                    self._show_howto()
+                                except Exception:
+                                    pass
+                                break
                             result = btn.action
                             running = False
                             break
@@ -419,6 +436,203 @@ class Menu:
             # prompt
             prompt = self.btn_font.render("Press any key or click to return", False, (200, 200, 200))
             self.screen.blit(prompt, prompt.get_rect(center=(w // 2, h - 60)))
+
+            pygame.display.flip()
+
+    def _show_howto(self):
+        """Display a simple 'How to Play' help screen. Returns when the user
+        presses any key or clicks the mouse.
+        """
+        raw_lines = [
+            "How to Play",
+            "",
+            "You explore rooms of 4 cards. Each card is one of:",
+            "- Clubs/Spades: Monsters (fight or attach to weapons)",
+            "- Diamonds: Weapons (equip to attach monsters)",
+            "- Hearts: Potions (restore health)",
+            "",
+            "Combat",
+            "When you click on a monster card, subtract its value from your health.",
+            "If you have a weapon equipped, subtract your weapon's value from the monster's value before applying to your health.",
+            "You can equip one weapon at a time; equip a weapon by clicking on it.",
+            "When you attack a monster with a weapon, it attaches to the weapon. The weapon is considered \"damaged\".",
+            "Damaged weapons cannot be used against monsters stronger than the currently attached monster's value.",
+            "",
+            "Rules & tips:",
+            "- Click a card to face it.",
+            "- If you have a weapon, monsters may attach to it; discard the weapon later to score.",
+            "- Potions immediately restore health up to your starting maximum.",
+            "- Try to survive and maximise your score by building weapon/monster combos.",
+            "",
+            "Controls:",
+            "- Click cards and menu buttons with the mouse.",
+            "- Use the on-screen buttons to navigate menus.",
+            "",
+        ]
+
+        # fonts
+        title_font = self.title_font if getattr(self, "title_font", None) is not None else pygame.font.Font(None, 48)
+        body_font = self.font if getattr(self, "font", None) is not None else pygame.font.Font(None, 20)
+        prompt_font = self.btn_font if getattr(self, "btn_font", None) is not None else pygame.font.Font(None, 20)
+
+        # layout constants
+        margin_x = 48
+        top_y = 96
+        bottom_reserved = 96
+        line_spacing = 6
+
+        # state
+        showing = True
+        clock = pygame.time.Clock()
+        scroll_y = 0
+
+        # We'll compute wrapped lines per-frame in case the window is resized.
+        while showing:
+            dt = clock.tick(60) / 1000.0
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
+                    raise SystemExit()
+                # support mouse wheel (pygame2) and legacy button 4/5
+                if ev.type == pygame.MOUSEWHEEL:
+                    scroll_y -= int(ev.y) * 36
+                if ev.type == pygame.MOUSEBUTTONDOWN:
+                    if ev.button == 4:  # wheel up
+                        scroll_y -= 36
+                        continue
+                    if ev.button == 5:  # wheel down
+                        scroll_y += 36
+                        continue
+                    # left-click returns
+                    if ev.button == 1:
+                        showing = False
+                        continue
+                if ev.type == pygame.KEYDOWN:
+                    # navigation keys
+                    try:
+                        if ev.key == pygame.K_UP:
+                            scroll_y -= 36
+                            continue
+                        if ev.key == pygame.K_DOWN:
+                            scroll_y += 36
+                            continue
+                        if ev.key == pygame.K_PAGEUP:
+                            scroll_y -= 200
+                            continue
+                        if ev.key == pygame.K_PAGEDOWN:
+                            scroll_y += 200
+                            continue
+                        if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
+                            showing = False
+                            continue
+                    except Exception:
+                        # if constants missing, fall back to closing on any key
+                        showing = False
+
+            # background like menu
+            w, h = self.screen.get_size()
+            tile = getattr(self, "_bg_tile", None)
+            if tile is not None:
+                tw, th = tile.get_size()
+                cw, ch = (120, 180)
+                virtual_w = 16 + (cw + 16) * 4 + 16 + cw + 16
+                virtual_h = max(640, 150 + ch + 200)
+                scale = min(w // virtual_w, h // virtual_h) if virtual_w and virtual_h else 0
+                if scale >= 1:
+                    cached = self._bg_tile_scaled_cache.get(scale)
+                    if cached is None:
+                        try:
+                            cached = pygame.transform.scale(tile, (tw * scale, th * scale))
+                        except Exception:
+                            cached = tile
+                        self._bg_tile_scaled_cache[scale] = cached
+                    ttw, tth = cached.get_size()
+                    dx = (w - virtual_w * scale) // 2
+                    dy = (h - virtual_h * scale) // 2
+                    off_x = dx % ttw
+                    off_y = dy % tth
+                    start_x = off_x
+                    start_y = off_y
+                    if start_x > 0:
+                        start_x -= ttw
+                    if start_y > 0:
+                        start_y -= tth
+                    for yy in range(start_y, h, tth):
+                        for xx in range(start_x, w, ttw):
+                            self.screen.blit(cached, (xx, yy))
+                else:
+                    for yy in range(0, h, th):
+                        for xx in range(0, w, tw):
+                            self.screen.blit(tile, (xx, yy))
+            else:
+                self.screen.fill((10, 10, 10))
+
+            # build wrapped lines for current width
+            max_width = max(100, w - margin_x * 2)
+            wrapped = []
+            for raw in raw_lines:
+                if raw.strip() == "":
+                    wrapped.append(("", None))
+                    continue
+                # title line remains a single line
+                if raw == "How to Play":
+                    wrapped.append((raw, "title"))
+                    continue
+                words = raw.split(" ")
+                cur = ""
+                for word in words:
+                    test = word if cur == "" else cur + " " + word
+                    try:
+                        w_test = body_font.size(test)[0]
+                    except Exception:
+                        w_test = len(test) * 8
+                    if w_test <= max_width:
+                        cur = test
+                    else:
+                        if cur:
+                            wrapped.append((cur, None))
+                        cur = word
+                if cur:
+                    wrapped.append((cur, None))
+
+            # compute total content height
+            y = top_y
+            content_heights = []
+            for txt, kind in wrapped:
+                if kind == "title":
+                    hgt = title_font.size(txt)[1]
+                elif txt == "":
+                    hgt = body_font.get_linesize() // 2
+                else:
+                    hgt = body_font.size(txt)[1]
+                content_heights.append(hgt)
+                y += hgt + line_spacing
+            content_height = y - top_y
+
+            # clamp scroll
+            visible_height = max(100, h - bottom_reserved - top_y)
+            max_scroll = max(0, content_height - visible_height)
+            if scroll_y < 0:
+                scroll_y = 0
+            if scroll_y > max_scroll:
+                scroll_y = max_scroll
+
+            # draw wrapped text with scroll offset
+            y = top_y - scroll_y
+            for (txt, kind), hgt in zip(wrapped, content_heights):
+                if txt == "":
+                    y += hgt
+                    continue
+                if kind == "title":
+                    surf = title_font.render(txt, False, (235, 220, 120))
+                    self.screen.blit(surf, surf.get_rect(center=(w // 2, y + hgt // 2)))
+                else:
+                    surf = body_font.render(txt, False, (240, 240, 240))
+                    self.screen.blit(surf, surf.get_rect(topleft=(margin_x, y)))
+                y += hgt + line_spacing
+
+            # prompt at bottom
+            prompt = prompt_font.render("Press ESC/Enter/Space or click to return — use mouse wheel or Up/Down to scroll", False, (200, 200, 200))
+            self.screen.blit(prompt, prompt.get_rect(center=(w // 2, h - 48)))
 
             pygame.display.flip()
 

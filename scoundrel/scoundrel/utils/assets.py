@@ -1,6 +1,6 @@
 from pathlib import Path
 import pygame
-from typing import Tuple
+from typing import Tuple, Optional
 
 
 # Simple card sprite-sheet loader.
@@ -121,7 +121,7 @@ class CardArtManager:
             # failure to load sheet; keep sheet None to signal fallback
             self.sheet = None
 
-    def get_card(self, suit: str, rank: str, size: Tuple[int, int] | None = None) -> pygame.Surface | None:
+    def get_card(self, suit: str, rank: str, size: Optional[Tuple[int, int]] = None) -> Optional[pygame.Surface]:
         """Return a Surface for the requested card. If the sheet isn't available, return None.
 
         size: optional target size (width, height). If provided, the returned surface is scaled.

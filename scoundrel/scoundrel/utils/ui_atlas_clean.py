@@ -111,7 +111,7 @@ class UIAtlas:
                     bboxes.append((minx, miny, maxx - minx + 1, maxy - miny + 1))
         return bboxes
 
-    def analyze_and_build_descriptor(self, out_json: Path, out_preview: Path | None = None):
+    def analyze_and_build_descriptor(self, out_json: Path, out_preview: Optional[Path] = None):
         surf = self.load_image()
         w, h = surf.get_size()
         bboxes = self.autoslice(min_area=30)

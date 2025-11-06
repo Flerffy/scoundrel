@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import random
-from typing import List
+from typing import List, Optional
 
 
 RANKS = [str(n) for n in range(2, 11)] + ["J", "Q", "K", "A"]
@@ -35,7 +35,7 @@ class Deck:
       - Hearts: 2-10 (9 Health potions)
     """
 
-    def __init__(self, cards: List[Card] | None = None):
+    def __init__(self, cards: Optional[List[Card]] = None):
         if cards is not None:
             self.cards = cards[:]
         else:

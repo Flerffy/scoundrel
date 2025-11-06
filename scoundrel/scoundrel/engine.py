@@ -1166,7 +1166,7 @@ class GameEngine:
             # fallback: set immediately
             self.equipped_weapon = {"card": card, "stack": [], "last_monster": None}
 
-    def _resolve_monster(self, card: Card, prefer_weapon: bool | None = None, start_pos=None):
+    def _resolve_monster(self, card: Card, prefer_weapon: Optional[bool] = None, start_pos=None):
         # choose behavior based on prefer_weapon flag
         monster_value = card.value
         if prefer_weapon is True:
