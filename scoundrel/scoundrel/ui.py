@@ -363,29 +363,64 @@ class Menu:
             else:
                 lines.append(l.rstrip())
 
-        # simple credits display loop
+        # Prepare rendered surfaces for lines to support scrolling
+        try:
+            body_font = self.font if getattr(self, "font", None) is not None else pygame.font.Font(None, 20)
+            title_font = self.title_font if getattr(self, "title_font", None) is not None else pygame.font.Font(None, 48)
+        except Exception:
+            body_font = pygame.font.Font(None, 20)
+            title_font = pygame.font.Font(None, 48)
+
+        line_surfs = []
+        for ln in lines:
+            if ln == "":
+                line_surfs.append(None)
+            else:
+                try:
+                    s = body_font.render(ln, False, (240, 240, 240))
+                except Exception:
+                    s = body_font.render(ln, False, (240, 240, 240))
+                line_surfs.append(s)
+
         showing = True
         clock = pygame.time.Clock()
+        scroll_y = 0
+
+        # Layout constants
+        top_y = 120
+        pad = 6
+        bottom_reserved = 96
+
         while showing:
-            clock.tick(60)
+            dt = clock.tick(60) / 1000.0
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT:
-                    # propagate quit by raising SystemExit to let caller handle
                     raise SystemExit()
-                if ev.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+                if ev.type == pygame.KEYDOWN:
                     showing = False
+                elif ev.type == pygame.MOUSEWHEEL:
+                    # scroll with wheel
+                    scroll_y -= int(ev.y) * 36
+                elif ev.type == pygame.MOUSEBUTTONDOWN:
+                    # wheel up/down legacy
+                    if ev.button == 4:
+                        scroll_y -= 36
+                        continue
+                    if ev.button == 5:
+                        scroll_y += 36
+                        continue
+                    # left-click closes
+                    if ev.button == 1:
+                        showing = False
 
             # draw background similar to menu
             w, h = self.screen.get_size()
             tile = getattr(self, "_bg_tile", None)
             if tile is not None:
                 tw, th = tile.get_size()
-                # reuse cached scaled tile if available
-                # compute scale like _draw to match tiling
                 cw, ch = (120, 180)
                 virtual_w = 16 + (cw + 16) * 4 + 16 + cw + 16
                 virtual_h = max(640, 150 + ch + 200)
-                # integer division to pick integer scale (may be 0)
                 scale = min(w // virtual_w, h // virtual_h) if virtual_w and virtual_h else 0
                 if scale >= 1:
                     cached = self._bg_tile_scaled_cache.get(scale)
@@ -406,7 +441,7 @@ class Menu:
                         start_x -= ttw
                     if start_y > 0:
                         start_y -= tth
-                    for yy in range(start_y, h, tth):
+                    for yy in range(start_x, h, tth):
                         for xx in range(start_x, w, ttw):
                             self.screen.blit(cached, (xx, yy))
                 else:
@@ -417,25 +452,48 @@ class Menu:
                 self.screen.fill((10, 10, 10))
 
             # title
-            title = self.title_font.render("Credits", False, (235, 220, 120))
+            title = title_font.render("Credits", False, (235, 220, 120))
             self.screen.blit(title, title.get_rect(center=(w // 2, 72)))
 
-            # render credits lines
-            y = 120
-            pad = 6
-            for ln in lines:
-                # wrap long lines crudely by clipping; user can insert line breaks
-                surf = self.font.render(ln, False, (240, 240, 240)) if ln != "" else None
-                if surf:
-                    r = surf.get_rect(center=(w // 2, y))
-                    self.screen.blit(surf, r)
-                    y += surf.get_height() + pad
+            # compute content height
+            content_h = 0
+            heights = []
+            for s in line_surfs:
+                if s is None:
+                    hgt = body_font.get_linesize() // 2
                 else:
-                    y += self.font.get_linesize() // 2
+                    hgt = s.get_height()
+                heights.append(hgt)
+                content_h += hgt + pad
 
-            # prompt
-            prompt = self.btn_font.render("Press any key or click to return", False, (200, 200, 200))
-            self.screen.blit(prompt, prompt.get_rect(center=(w // 2, h - 60)))
+            visible_h = max(100, h - bottom_reserved - top_y)
+            max_scroll = max(0, content_h - visible_h)
+            if scroll_y < 0:
+                scroll_y = 0
+            if scroll_y > max_scroll:
+                scroll_y = max_scroll
+
+            # render lines with scroll offset
+            y = top_y - scroll_y
+            for s, hgt in zip(line_surfs, heights):
+                if s is None:
+                    y += hgt
+                    continue
+                r = s.get_rect(center=(w // 2, y + hgt // 2))
+                # only blit if on-screen
+                if r.bottom >= top_y and r.top <= (h - bottom_reserved):
+                    self.screen.blit(s, r)
+                y += hgt + pad
+
+            # subtle prompt
+            try:
+                small_prompt_font = pygame.font.Font(None, 14)
+            except Exception:
+                small_prompt_font = self.btn_font
+            prompt = small_prompt_font.render("Click to return", False, (120, 120, 120))
+            pr = prompt.get_rect()
+            pr.bottomright = (w - 12, h - 12)
+            self.screen.blit(prompt, pr)
 
             pygame.display.flip()
 
@@ -630,9 +688,15 @@ class Menu:
                     self.screen.blit(surf, surf.get_rect(topleft=(margin_x, y)))
                 y += hgt + line_spacing
 
-            # prompt at bottom
-            prompt = prompt_font.render("Press ESC/Enter/Space or click to return — use mouse wheel or Up/Down to scroll", False, (200, 200, 200))
-            self.screen.blit(prompt, prompt.get_rect(center=(w // 2, h - 48)))
+            # subtle, less-distracting prompt in the bottom-right corner
+            try:
+                small_prompt_font = pygame.font.Font(None, 14)
+            except Exception:
+                small_prompt_font = prompt_font
+            prompt = small_prompt_font.render("Esc/Enter/Space or click to return", False, (120, 120, 120))
+            pr = prompt.get_rect()
+            pr.bottomright = (w - 12, h - 12)
+            self.screen.blit(prompt, pr)
 
             pygame.display.flip()
 
