@@ -1,20 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_submodules
-
 
 a = Analysis(
     ['pyinstaller_launcher.py'],
-    pathex=['.'],
+    pathex=[],
     binaries=[],
-    # Bundle the entire assets tree and package data directories so art,
-    # audio, and fonts are available at runtime. The destination side
-    # uses the same relative path so code can reference e.g. 'scoundrel/assets'.
-    datas=[
-        ('scoundrel/assets', 'scoundrel/assets'),
-        ('scoundrel/data', 'scoundrel/data'),
-        ('data', 'data'),
-    ],
+    datas=[('scoundrel/assets', 'scoundrel/assets'), ('scoundrel/data', 'scoundrel/data'), ('data', 'data')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -38,7 +29,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
